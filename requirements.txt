@@ -1,0 +1,14 @@
+accelerate
+datasets
+einops
+huggingface-hub
+natsort
+safetensors
+simple-parsing
+torch
+transformers
+wandb
+scikit-learn
+ipykernel
+jupyter
+matplotlib
