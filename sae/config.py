@@ -71,3 +71,44 @@ class TrainConfig(Serializable):
         assert not (
             self.layers and self.layer_stride != 1
         ), "Cannot specify both `layers` and `layer_stride`."
+
+
+@dataclass
+class TrainLayerRangeConfig(Serializable):
+    sae: SaeConfig
+
+    batch_size: int = 8
+    """Batch size measured in sequences."""
+
+    grad_acc_steps: int = 1
+    """Number of steps over which to accumulate gradients."""
+
+    micro_acc_steps: int = 1
+    """Chunk the activations into this number of microbatches for SAE training."""
+
+    lr: float | None = None
+    """Base LR. If None, it is automatically chosen based on the number of latents."""
+
+    lr_warmup_steps: int = 1000
+
+    auxk_alpha: float = 0.0
+    """Weight of the auxiliary loss term."""
+
+    dead_feature_threshold: int = 10_000_000
+    """Number of tokens after which a feature is considered dead."""
+
+    hookpoint_segments: list[list[str]] = list_field()
+    """List of segments of layersto train SAEs on."""
+
+    layers: list[list[int]] = list_field()
+    """List of segments of layer indices to train SAEs on."""
+
+    distribute_modules: bool = False
+    """Store a single copy of each SAE, instead of copying them across devices."""
+
+    save_every: int = 1000
+    """Save SAEs every `save_every` steps."""
+
+    log_to_wandb: bool = True
+    run_name: str | None = None
+    wandb_log_frequency: int = 1

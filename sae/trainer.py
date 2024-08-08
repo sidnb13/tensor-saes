@@ -12,9 +12,14 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
-from .config import TrainConfig
+from .config import TrainConfig, TrainLayerRangeConfig
 from .sae import Sae
-from .utils import geometric_median, get_layer_list, resolve_widths
+from .utils import (
+    geometric_median,
+    get_layer_list,
+    resolve_widths,
+    resolve_widths_rangewise,
+)
 
 
 class SaeTrainer:
@@ -78,7 +83,7 @@ class SaeTrainer:
         print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
 
         try:
-            from bitsandbytes.optim import Adam8bit as Adam
+            from bitsandbytes.optim import Adam8bit as Adam  # type: ignore  # noqa: I001
 
             print("Using 8-bit Adam from bitsandbytes")
         except ImportError:
@@ -394,6 +399,142 @@ class SaeTrainer:
 
                 path = self.cfg.run_name or "checkpoints"
                 sae.save_to_disk(f"{path}/{hook}")
+
+        # Barrier to ensure all ranks have saved before continuing
+        if dist.is_initialized():
+            dist.barrier()
+
+
+class SaeLayerRangeTrainer(SaeTrainer):
+    def __init__(
+        self, cfg: TrainLayerRangeConfig, dataset: Dataset, model: PreTrainedModel
+    ):
+        if cfg.hookpoint_segments:
+            assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
+
+            # Replace wildcard patterns
+            raw_hookpoints = []
+            for segment in cfg.hookpoint_segments:
+                for name, _ in model.named_modules():
+                    if any(fnmatchcase(name, pat) for pat in segment):
+                        raw_hookpoints.append(name)
+
+                # Natural sort to impose a consistent order
+                sorted_hookpoints = natsorted(raw_hookpoints)
+                raw_hookpoints.append(tuple(sorted_hookpoints))
+
+            cfg.hookpoint_segments = raw_hookpoints
+        else:
+            # If no layers are specified, train on all of them
+            if not cfg.layers:
+                N = model.config.num_hidden_layers
+                cfg.layers = [tuple(range(N))]
+
+            # Now convert layers to hookpoints
+            layers_name, _ = get_layer_list(model)
+            raw_hookpoints = []
+
+            for segment_layers in cfg.layers:
+                segment_hookpoints = [f"{layers_name}.{i}" for i in segment_layers]
+                raw_hookpoints.append(tuple(segment_hookpoints))
+
+            cfg.hookpoint_segments = raw_hookpoints
+
+        self.cfg = cfg
+        self.dataset = dataset
+        self.distribute_modules()
+
+        assert isinstance(dataset, Sized)
+        num_examples = len(dataset)
+
+        device = model.device
+        input_widths = resolve_widths_rangewise(model, cfg.hookpoint_segments)
+        unique_widths = set(input_widths.values())
+
+        if cfg.distribute_modules and len(unique_widths) > 1:
+            # dist.all_to_all requires tensors to have the same shape across ranks
+            raise ValueError(
+                f"All modules must output tensors of the same shape when using "
+                f"`distribute_modules=True`, got {unique_widths}"
+            )
+
+        self.model = model
+        self.saes = {
+            hook_segment: Sae(input_widths[hook_segment], cfg.sae, device)
+            for hook_segment in self.local_hookpoints()
+        }
+
+        pgs = [
+            {
+                "params": sae.parameters(),
+                # Auto-select LR using 1 / sqrt(d) scaling law from Fig 3 of the paper
+                "lr": cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
+            }
+            for sae in self.saes.values()
+        ]
+        # Dedup the learning rates we're using, sort them, round to 2 decimal places
+        lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
+        print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
+
+        try:
+            from bitsandbytes.optim import Adam8bit as Adam  # type: ignore  # noqa: I001
+
+            print("Using 8-bit Adam from bitsandbytes")
+        except ImportError:
+            from torch.optim import Adam
+
+            print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
+            print("Run `pip install bitsandbytes` for less memory usage.")
+
+        self.optimizer = Adam(pgs)
+        self.lr_scheduler = get_linear_schedule_with_warmup(
+            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
+        )
+
+    def local_hookpoints(self) -> list[str]:
+        return (
+            self.module_plan[dist.get_rank()]
+            if self.module_plan
+            else self.cfg.hookpoint_segments
+        )
+
+    def distribute_modules(self):
+        """Prepare a plan for distributing modules across ranks."""
+        if not self.cfg.distribute_modules:
+            self.module_plan = []
+            print(f"Training on modules segments: {self.cfg.hookpoint_segments}")
+            return
+
+        segments_per_rank, rem = divmod(
+            len(self.cfg.hookpoint_segments), dist.get_world_size()
+        )
+        assert rem == 0, "Number of modules must be divisible by world size"
+
+        # Each rank gets a subset of the layers
+        self.module_plan = [
+            self.cfg.hookpoint_segments[start : start + segments_per_rank]
+            for start in range(0, len(self.cfg.hookpoint_segments), segments_per_rank)
+        ]
+        for rank, modules in enumerate(self.module_plan):
+            print(f"Rank {rank} modules: {modules}")
+
+    def save(self):
+        """Save the SAEs to disk."""
+
+        if (
+            self.cfg.distribute_modules
+            or not dist.is_initialized()
+            or dist.get_rank() == 0
+        ):
+            print("Saving checkpoint")
+
+            for hook, sae in self.saes.items():
+                assert isinstance(sae, Sae)
+
+                hook_name = "_".join(hook)
+
+                path = self.cfg.run_name or "checkpoints"
+                sae.save_to_disk(f"{path}/{hook_name}")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():

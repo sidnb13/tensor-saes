@@ -1,3 +1,5 @@
+from collections import defaultdict
+from functools import partial
 import os
 from typing import Any, Type, TypeVar, cast
 
@@ -61,12 +63,12 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
 
 @torch.inference_mode()
 def resolve_widths(
-    model: PreTrainedModel, module_names: list[str], dim: int = -1,
+    model: PreTrainedModel,
+    module_names: list[str],
+    dim: int = -1,
 ) -> dict[str, int]:
     """Find number of output dimensions for the specified modules."""
-    module_to_name = {
-        model.get_submodule(name): name for name in module_names
-    }
+    module_to_name = {model.get_submodule(name): name for name in module_names}
     shapes: dict[str, int] = {}
 
     def hook(module, _, output):
@@ -77,16 +79,53 @@ def resolve_widths(
         name = module_to_name[module]
         shapes[name] = output.shape[dim]
 
-    handles = [
-        mod.register_forward_hook(hook) for mod in module_to_name
-    ]
+    handles = [mod.register_forward_hook(hook) for mod in module_to_name]
     dummy = send_to_device(model.dummy_inputs, model.device)
     try:
         model(**dummy)
     finally:
         for handle in handles:
             handle.remove()
-    
+
+    return shapes
+
+
+@torch.inference_mode()
+def resolve_widths_rangewise(
+    model: PreTrainedModel,
+    module_names_range: list[list[str]],
+    dim: int = -1,
+) -> dict[str, int]:
+    """Find number of output dimensions for the specified modules."""
+    module_to_name = [
+        {model.get_submodule(name): name for name in module_names}
+        for module_names in module_names_range
+    ]
+    shapes = defaultdict(int)
+
+    def hook(i, module, _, output):
+        # Unpack tuples if needed
+        if isinstance(output, tuple):
+            output, *_ = output
+
+        # accumulate the shapes
+        shapes[module_to_name[i].keys()] += output.shape[dim]
+
+    handles = [
+        [
+            mod.register_forward_hook(partial(hook, i))
+            for i, mod in enumerate(module_list)
+        ]
+        for module_list in module_to_name
+    ]
+    dummy = send_to_device(model.dummy_inputs, model.device)
+    try:
+        model(**dummy)
+    finally:
+        for handle_list in handles:
+            for handle in handle_list:
+                handle.remove()
+
     return shapes
 
 
