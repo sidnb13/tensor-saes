@@ -109,14 +109,11 @@ def resolve_widths_rangewise(
             output, *_ = output
 
         # accumulate the shapes
-        shapes[module_to_name[i].keys()] += output.shape[dim]
+        shapes[module_names_range[i]] += output.shape[dim]
 
     handles = [
-        [
-            mod.register_forward_hook(partial(hook, i))
-            for i, mod in enumerate(module_list)
-        ]
-        for module_list in module_to_name
+        [mod.register_forward_hook(partial(hook, i)) for mod in module_list]
+        for i, module_list in enumerate(module_to_name)
     ]
     dummy = send_to_device(model.dummy_inputs, model.device)
     try:

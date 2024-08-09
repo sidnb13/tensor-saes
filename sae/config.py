@@ -97,7 +97,7 @@ class TrainLayerRangeConfig(Serializable):
     dead_feature_threshold: int = 10_000_000
     """Number of tokens after which a feature is considered dead."""
 
-    hookpoint_segments: list[list[str]] = list_field()
+    hookpoints: list[list[str]] = list_field()
     """List of segments of layersto train SAEs on."""
 
     layers: list[list[int]] = list_field()
@@ -109,6 +109,6 @@ class TrainLayerRangeConfig(Serializable):
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 
-    log_to_wandb: bool = True
+    log_to_wandb: bool = False
     run_name: str | None = None
     wandb_log_frequency: int = 1

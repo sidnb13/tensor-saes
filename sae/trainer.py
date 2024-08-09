@@ -409,12 +409,12 @@ class SaeLayerRangeTrainer(SaeTrainer):
     def __init__(
         self, cfg: TrainLayerRangeConfig, dataset: Dataset, model: PreTrainedModel
     ):
-        if cfg.hookpoint_segments:
+        if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
             # Replace wildcard patterns
             raw_hookpoints = []
-            for segment in cfg.hookpoint_segments:
+            for segment in cfg.hookpoints:
                 for name, _ in model.named_modules():
                     if any(fnmatchcase(name, pat) for pat in segment):
                         raw_hookpoints.append(name)
@@ -423,7 +423,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 sorted_hookpoints = natsorted(raw_hookpoints)
                 raw_hookpoints.append(tuple(sorted_hookpoints))
 
-            cfg.hookpoint_segments = raw_hookpoints
+            cfg.hookpoints = raw_hookpoints
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
@@ -438,7 +438,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 segment_hookpoints = [f"{layers_name}.{i}" for i in segment_layers]
                 raw_hookpoints.append(tuple(segment_hookpoints))
 
-            cfg.hookpoint_segments = raw_hookpoints
+            cfg.hookpoints = raw_hookpoints
 
         self.cfg = cfg
         self.dataset = dataset
@@ -448,7 +448,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
         num_examples = len(dataset)
 
         device = model.device
-        input_widths = resolve_widths_rangewise(model, cfg.hookpoint_segments)
+        input_widths = resolve_widths_rangewise(model, cfg.hookpoints)
         unique_widths = set(input_widths.values())
 
         if cfg.distribute_modules and len(unique_widths) > 1:
@@ -491,32 +491,230 @@ class SaeLayerRangeTrainer(SaeTrainer):
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
 
-    def local_hookpoints(self) -> list[str]:
-        return (
-            self.module_plan[dist.get_rank()]
-            if self.module_plan
-            else self.cfg.hookpoint_segments
+    def fit(self):
+        # Use Tensor Cores even for fp32 matmuls
+        torch.set_float32_matmul_precision("high")
+
+        rank_zero = not dist.is_initialized() or dist.get_rank() == 0
+        ddp = dist.is_initialized() and not self.cfg.distribute_modules
+
+        if self.cfg.log_to_wandb and rank_zero:
+            try:
+                import wandb
+
+                wandb.init(
+                    name=self.cfg.run_name,
+                    project="sae",
+                    config=asdict(self.cfg),
+                    save_code=True,
+                )
+            except ImportError:
+                print("Weights & Biases not installed, skipping logging.")
+                self.cfg.log_to_wandb = False
+
+        num_sae_params = sum(
+            p.numel() for s in self.saes.values() for p in s.parameters()
         )
+        num_model_params = sum(p.numel() for p in self.model.parameters())
+        print(f"Number of SAE parameters: {num_sae_params:_}")
+        print(f"Number of model parameters: {num_model_params:_}")
 
-    def distribute_modules(self):
-        """Prepare a plan for distributing modules across ranks."""
-        if not self.cfg.distribute_modules:
-            self.module_plan = []
-            print(f"Training on modules segments: {self.cfg.hookpoint_segments}")
-            return
-
-        segments_per_rank, rem = divmod(
-            len(self.cfg.hookpoint_segments), dist.get_world_size()
+        device = self.model.device
+        dl = DataLoader(
+            self.dataset,
+            batch_size=self.cfg.batch_size,
+            shuffle=True,
         )
-        assert rem == 0, "Number of modules must be divisible by world size"
+        pbar = tqdm(dl, desc="Training", disable=not rank_zero)
 
-        # Each rank gets a subset of the layers
-        self.module_plan = [
-            self.cfg.hookpoint_segments[start : start + segments_per_rank]
-            for start in range(0, len(self.cfg.hookpoint_segments), segments_per_rank)
-        ]
-        for rank, modules in enumerate(self.module_plan):
-            print(f"Rank {rank} modules: {modules}")
+        did_fire = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
+            for name, sae in self.saes.items()
+        }
+        num_tokens_since_fired = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
+            for name, sae in self.saes.items()
+        }
+        num_tokens_in_step = 0
+
+        # For logging purposes
+        avg_auxk_loss = defaultdict(float)
+        avg_fvu = defaultdict(float)
+
+        hidden_dict = defaultdict(list)
+        name_to_module_list = {
+            hookpoints: tuple([self.model.get_submodule(name) for name in hookpoints])
+            for hookpoints in self.cfg.hookpoints
+        }
+
+        def hook(module: nn.Module, _, outputs):
+            # Maybe unpack tuple outputs
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+            key = next(
+                (
+                    names
+                    for names, mods in name_to_module_list.items()
+                    if module in mods
+                ),
+                None,
+            )
+            hidden_dict[key].append(outputs.flatten(0, 1))
+
+        for i, batch in enumerate(pbar):
+            hidden_dict = defaultdict(list)
+
+            # Bookkeeping for dead feature detection
+            num_tokens_in_step += batch["input_ids"].numel()
+
+            # Forward pass on the model to get the next batch of activations
+            nested_handles = [
+                [mod.register_forward_hook(hook) for mod in mods]
+                for mods in name_to_module_list.values()
+            ]
+            try:
+                with torch.no_grad():
+                    self.model(batch["input_ids"].to(device))
+                # concatenate outputs in hidden_dict
+                hidden_dict = {
+                    key: torch.cat(outputs, dim=-1)
+                    for key, outputs in hidden_dict.items()
+                }
+            finally:
+                for handles in nested_handles:
+                    for h in handles:
+                        h.remove()
+
+            if self.cfg.distribute_modules:
+                hidden_dict = self.scatter_hiddens(hidden_dict)
+
+            for names, hiddens in hidden_dict.items():
+                raw = self.saes[names]  # 'raw' never has a DDP wrapper
+
+                # On the first iteration, initialize the decoder bias
+                if i == 0:
+                    # NOTE: The all-cat here could conceivably cause an OOM in some
+                    # cases, but it's unlikely to be a problem with small world sizes.
+                    # We could avoid this by "approximating" the geometric median
+                    # across all ranks with the mean (median?) of the geometric medians
+                    # on each rank. Not clear if that would hurt performance.
+                    median = geometric_median(self.maybe_all_cat(hiddens))
+                    raw.b_dec.data = median.to(raw.dtype)
+
+                    # Wrap the SAEs with Distributed Data Parallel. We have to do this
+                    # after we set the decoder bias, otherwise DDP will not register
+                    # gradients flowing to the bias after the first step.
+                    maybe_wrapped = (
+                        {
+                            name: DDP(sae, device_ids=[dist.get_rank()])
+                            for name, sae in self.saes.items()
+                        }
+                        if ddp
+                        else self.saes
+                    )
+
+                # Make sure the W_dec is still unit-norm
+                if raw.cfg.normalize_decoder:
+                    raw.set_decoder_norm_to_unit_norm()
+
+                acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
+                denom = acc_steps * self.cfg.wandb_log_frequency
+                wrapped = maybe_wrapped[names]
+
+                # Save memory by chunking the activations
+                for chunk in hiddens.chunk(self.cfg.micro_acc_steps):
+                    out = wrapped(
+                        chunk,
+                        dead_mask=(
+                            num_tokens_since_fired[names]
+                            > self.cfg.dead_feature_threshold
+                            if self.cfg.auxk_alpha > 0
+                            else None
+                        ),
+                    )
+
+                    avg_fvu[names] += float(
+                        self.maybe_all_reduce(out.fvu.detach()) / denom
+                    )
+                    if self.cfg.auxk_alpha > 0:
+                        avg_auxk_loss[names] += float(
+                            self.maybe_all_reduce(out.auxk_loss.detach()) / denom
+                        )
+
+                    loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                    loss.div(acc_steps).backward()
+
+                    # Update the did_fire mask
+                    did_fire[names][out.latent_indices.flatten()] = True
+                    self.maybe_all_reduce(
+                        did_fire[names], "max"
+                    )  # max is boolean "any"
+
+                # Clip gradient norm independently for each SAE
+                torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
+
+            # Check if we need to actually do a training step
+            step, substep = divmod(i + 1, self.cfg.grad_acc_steps)
+            if substep == 0:
+                if self.cfg.sae.normalize_decoder:
+                    for sae in self.saes.values():
+                        sae.remove_gradient_parallel_to_decoder_directions()
+
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                self.lr_scheduler.step()
+
+                ###############
+                with torch.no_grad():
+                    # Update the dead feature mask
+                    for names, counts in num_tokens_since_fired.items():
+                        counts += num_tokens_in_step
+                        counts[did_fire[names]] = 0
+
+                    # Reset stats for this step
+                    num_tokens_in_step = 0
+                    for mask in did_fire.values():
+                        mask.zero_()
+
+                if (
+                    self.cfg.log_to_wandb
+                    and (step + 1) % self.cfg.wandb_log_frequency == 0
+                ):
+                    info = {}
+
+                    for names in self.saes:
+                        mask = (
+                            num_tokens_since_fired[names]
+                            > self.cfg.dead_feature_threshold
+                        )
+
+                        info.update(
+                            {
+                                f"fvu/{names}": avg_fvu[names],
+                                f"dead_pct/{names}": mask.mean(
+                                    dtype=torch.float32
+                                ).item(),
+                            }
+                        )
+                        if self.cfg.auxk_alpha > 0:
+                            info[f"auxk/{names}"] = avg_auxk_loss[names]
+
+                    avg_auxk_loss.clear()
+                    avg_fvu.clear()
+
+                    if self.cfg.distribute_modules:
+                        outputs = [{} for _ in range(dist.get_world_size())]
+                        dist.gather_object(info, outputs if rank_zero else None)
+                        info.update({k: v for out in outputs for k, v in out.items()})
+
+                    if rank_zero:
+                        wandb.log(info, step=step)
+
+                if (step + 1) % self.cfg.save_every == 0:
+                    self.save()
+
+        self.save()
+        pbar.close()
 
     def save(self):
         """Save the SAEs to disk."""
