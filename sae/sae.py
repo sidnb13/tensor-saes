@@ -66,7 +66,7 @@ class Sae(nn.Module):
     def load_many(
         name: str,
         local: bool = False,
-        layers: list[str] | None = None,
+        layers: list[str] | list[tuple[str, ...]] | None = None,
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
@@ -80,8 +80,12 @@ class Sae(nn.Module):
             repo_path = Path(snapshot_download(name, allow_patterns=pattern))
 
         if layers is not None:
+            if isinstance(layers[0], tuple):
+                layers = ["_".join(layer) for layer in layers]
             return {
-                layer: Sae.load_from_disk(repo_path / layer, device=device, decoder=decoder)
+                layer: Sae.load_from_disk(
+                    repo_path / layer, device=device, decoder=decoder
+                )
                 for layer in natsorted(layers)
             }
         files = [
