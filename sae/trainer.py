@@ -1,3 +1,4 @@
+from audioop import avg
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -145,6 +146,7 @@ class SaeTrainer:
 
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
+        avg_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
 
         hidden_dict: dict[str, Tensor] = {}
@@ -180,6 +182,8 @@ class SaeTrainer:
 
             if self.cfg.distribute_modules:
                 hidden_dict = self.scatter_hiddens(hidden_dict)
+
+            grad_norms = {}
 
             for name, hiddens in hidden_dict.items():
                 raw = self.saes[name]  # 'raw' never has a DDP wrapper
@@ -237,12 +241,18 @@ class SaeTrainer:
                     loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
                     loss.div(acc_steps).backward()
 
+                    avg_loss[name] += float(
+                        self.maybe_all_reduce(loss.detach()) / denom
+                    )
+
                     # Update the did_fire mask
                     did_fire[name][out.latent_indices.flatten()] = True
                     self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
 
                 # Clip gradient norm independently for each SAE
-                torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
+                grad_norms[name] = torch.nn.utils.clip_grad_norm_(
+                    raw.parameters(), 1.0
+                ).item()
 
             # Check if we need to actually do a training step
             step, substep = divmod(i + 1, self.cfg.grad_acc_steps)
@@ -273,7 +283,7 @@ class SaeTrainer:
                 ):
                     info = {}
 
-                    for name in self.saes:
+                    for i, name in enumerate(self.saes):
                         mask = (
                             num_tokens_since_fired[name]
                             > self.cfg.dead_feature_threshold
@@ -285,6 +295,9 @@ class SaeTrainer:
                                 f"dead_pct/{name}": mask.mean(
                                     dtype=torch.float32
                                 ).item(),
+                                f"loss/{name}": avg_loss[name],
+                                f"lr/{name}": self.optimizer.param_groups[i]["lr"],
+                                f"grad_norm/{name}": grad_norms[name],
                             }
                         )
                         if self.cfg.auxk_alpha > 0:
@@ -590,6 +603,8 @@ class SaeLayerRangeTrainer(SaeTrainer):
             if self.cfg.distribute_modules:
                 hidden_dict = self.scatter_hiddens(hidden_dict)
 
+            grad_norms = {}
+
             for names, hiddens in hidden_dict.items():
                 raw = self.saes[names]  # 'raw' never has a DDP wrapper
 
@@ -657,7 +672,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     )  # max is boolean "any"
 
                 # Clip gradient norm independently for each SAE
-                torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
+                grad_norms[names] = torch.nn.utils.clip_grad_norm_(
+                    raw.parameters(), 1.0
+                ).item()
 
             # Check if we need to actually do a training step
             step, substep = divmod(i + 1, self.cfg.grad_acc_steps)
@@ -694,13 +711,19 @@ class SaeLayerRangeTrainer(SaeTrainer):
                             > self.cfg.dead_feature_threshold
                         )
 
+                        names_str = "_".join(names)
+
                         info.update(
                             {
-                                f"fvu/{names}": avg_fvu[names],
-                                f"dead_pct/{names}": mask.mean(
+                                f"fvu/{names_str}": avg_fvu[names],
+                                f"dead_pct/{names_str}": mask.mean(
                                     dtype=torch.float32
                                 ).item(),
-                                f"loss/{names}": avg_loss[names],
+                                f"loss/{names_str}": avg_loss[names],
+                                f"lr/{names_str}": self.optimizer.param_groups[-1][
+                                    "lr"
+                                ],
+                                f"grad_norm/{names_str}": grad_norms[names],
                             }
                         )
                         if self.cfg.auxk_alpha > 0:

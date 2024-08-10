@@ -8,13 +8,13 @@ CTX_LEN=64
 BATCH_SIZE=2048
 GRAD_ACC_STEPS=4
 MICRO_ACC_STEPS=4
-LR_WARMUP_STEPS=10000
+LR_WARMUP_STEPS=500
 LR=1e-4
 # AUXK_ALPHA=0.03125
 AUXK_ALPHA=0.0
 DEAD_FEATURE_THRESHOLD=100000
 LOG_TO_WANDB=True
-MAX_EXAMPLES=5000000
+MAX_EXAMPLES=10000000
 K=256
 
 export WANDB_PROJECT="sae-experiments"
@@ -38,7 +38,7 @@ python -m sae $MODEL $DATASET \
     --run_name baseline_cross_layer \
     --log_to_wandb $LOG_TO_WANDB
 
-Individual layer training
+# Individual layer training
 for LAYER in 8 9 10 11
 do
     python -m sae $MODEL $DATASET \
