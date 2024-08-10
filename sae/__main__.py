@@ -9,14 +9,14 @@ from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
-from .data import chunk_and_tokenize, MemmapDataset
-from .trainer import SaeTrainer, TrainConfig
+from .data import MemmapDataset, chunk_and_tokenize
+from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
 
 
 @dataclass
 class RunConfig(TrainConfig):
     model: str = field(
-        default="EleutherAI/pythia-160m",
+        default="gpt2",
         positional=True,
     )
     """Name of the model to train."""
@@ -39,7 +39,7 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
-    max_examples: int | None = None
+    max_examples: int = -1
     """Maximum number of examples to use for training."""
 
     data_preprocessing_num_proc: int = field(
@@ -48,7 +48,9 @@ class RunConfig(TrainConfig):
     """Number of processes to use for preprocessing data"""
 
 
-def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+def load_artifacts(
+    args: RunConfig, rank: int
+) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -100,7 +102,8 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
             print("Dataset already tokenized; skipping tokenization.")
 
         dataset = dataset.with_format("torch")
-        if limit := args.max_examples:
+
+        if (limit := args.max_examples) and args.max_examples > 0:
             dataset = dataset.select(range(limit))
 
     return model, dataset
@@ -129,12 +132,16 @@ def run():
             model, dataset = load_artifacts(args, rank)
         dataset = dataset.shard(dist.get_world_size(), rank)
 
+    trainer_cls = (
+        SaeTrainer if not args.enable_cross_layer_training else SaeLayerRangeTrainer
+    )
+
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
-
-        trainer = SaeTrainer(args, dataset, model)
+        trainer = trainer_cls(args, dataset, model)
+        print(f"SAEs: {trainer.saes}")
         trainer.fit()
 
 

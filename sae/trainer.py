@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
-from .config import TrainConfig, TrainLayerRangeConfig
+from .config import TrainConfig
 from .sae import Sae
 from .utils import (
     geometric_median,
@@ -398,7 +398,7 @@ class SaeTrainer:
                 assert isinstance(sae, Sae)
 
                 path = self.cfg.run_name or "checkpoints"
-                sae.save_to_disk(f"{path}/{hook}")
+                sae.save_to_disk(f"{self.cfg.root_path}/{path}/{hook}")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():
@@ -406,9 +406,7 @@ class SaeTrainer:
 
 
 class SaeLayerRangeTrainer(SaeTrainer):
-    def __init__(
-        self, cfg: TrainLayerRangeConfig, dataset: Dataset, model: PreTrainedModel
-    ):
+    def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -429,6 +427,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
             if not cfg.layers:
                 N = model.config.num_hidden_layers
                 cfg.layers = [tuple(range(N))]
+            else:
+                # TODO: temp hack because parsing doesn't support nested lists
+                cfg.layers = [tuple(sorted(cfg.layers))]
 
             # Now convert layers to hookpoints
             layers_name, _ = get_layer_list(model)
@@ -539,6 +540,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
+        avg_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
 
         hidden_dict = defaultdict(list)
@@ -644,6 +646,10 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
                     loss.div(acc_steps).backward()
 
+                    avg_loss[names] += float(
+                        self.maybe_all_reduce(loss.detach()) / denom
+                    )
+
                     # Update the did_fire mask
                     did_fire[names][out.latent_indices.flatten()] = True
                     self.maybe_all_reduce(
@@ -694,6 +700,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                                 f"dead_pct/{names}": mask.mean(
                                     dtype=torch.float32
                                 ).item(),
+                                f"loss/{names}": avg_loss[names],
                             }
                         )
                         if self.cfg.auxk_alpha > 0:
@@ -732,7 +739,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 hook_name = "_".join(hook)
 
                 path = self.cfg.run_name or "checkpoints"
-                sae.save_to_disk(f"{path}/{hook_name}")
+                sae.save_to_disk(f"{self.cfg.root_path}/{path}/{hook_name}")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():

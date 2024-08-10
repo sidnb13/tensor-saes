@@ -1,6 +1,6 @@
 from .config import SaeConfig, TrainConfig
 from .sae import Sae
-from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainLayerRangeConfig
+from .trainer import SaeLayerRangeTrainer, SaeTrainer
 
 __all__ = [
     "Sae",
@@ -8,5 +8,4 @@ __all__ = [
     "SaeTrainer",
     "TrainConfig",
     "SaeLayerRangeTrainer",
-    "TrainLayerRangeConfig",
 ]
