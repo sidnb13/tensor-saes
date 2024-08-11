@@ -48,6 +48,25 @@ python -m sae \
     dataset=$DATASET \
     sae.k=$K \
     sae.scale_encoder_k=true,false \
+    layers=[8] \
+    split=$SPLIT \
+    ctx_len=$CTX_LEN \
+    max_examples=$MAX_EXAMPLES \
+    batch_size=$BATCH_SIZE \
+    grad_acc_steps=$GRAD_ACC_STEPS \
+    micro_acc_steps=$MICRO_ACC_STEPS \
+    lr_warmup_steps=$LR_WARMUP_STEPS \
+    lr=$LR \
+    auxk_alpha=$AUXK_ALPHA \
+    dead_feature_threshold=$DEAD_FEATURE_THRESHOLD \
+    run_name=encoder_scale_k_test \
+    log_to_wandb=$LOG_TO_WANDB
+
+python -m sae \
+    --multirun \
+    model=$MODEL \
+    dataset=$DATASET \
+    sae.k=$K \
     sae.scale_encoder_fvu=null,0.1,0.3,0.5,0.9 \
     layers=[8] \
     split=$SPLIT \
@@ -60,5 +79,5 @@ python -m sae \
     lr=$LR \
     auxk_alpha=$AUXK_ALPHA \
     dead_feature_threshold=$DEAD_FEATURE_THRESHOLD \
-    run_name=$RUN_NAME \
+    run_name=encoder_scale_fvu_test \
     log_to_wandb=$LOG_TO_WANDB

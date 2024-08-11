@@ -1,4 +1,3 @@
-from audioop import avg
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -312,6 +311,7 @@ class SaeTrainer:
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
+                    avg_loss.clear()
 
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
