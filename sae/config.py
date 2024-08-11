@@ -15,6 +15,12 @@ class SaeConfig(Serializable):
     normalize_decoder: bool = True
     """Normalize the decoder weights to have unit norm."""
 
+    scale_encoder_k: bool = False
+    """Scale the encoder weights with factor of 1/sqrt(k)."""
+
+    scale_encoder_fvu: float = None
+    """Scale the encoder weights so no more than FVU specified is explained."""
+
     num_latents: int = 0
     """Number of latents to use. If 0, use `expansion_factor`."""
 

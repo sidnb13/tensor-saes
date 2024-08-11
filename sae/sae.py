@@ -1,4 +1,5 @@
 import json
+import math
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
@@ -239,6 +240,33 @@ class Sae(nn.Module):
             fvu,
             auxk_loss,
         )
+
+    @torch.no_grad()
+    def scale_encoder_k(self):
+        scale = 1 / math.sqrt(self.cfg.k)
+        self.encoder.weight.data *= scale
+        self.encoder.bias.data *= scale
+
+    @torch.no_grad()
+    def scale_encoder_fvu(self, all_hiddens: Tensor, chunk_size):
+        # (batch, seq, hidden * num_layers)
+        total_variance = (all_hiddens - all_hiddens.mean(0)).pow(2).sum(0)
+        # compute output variance
+        output_variance = torch.zeros(
+            *all_hiddens.shape[1:], device=all_hiddens.device, dtype=all_hiddens.dtype
+        )
+        for chunk in all_hiddens.chunk(chunk_size):
+            sae_out = self(chunk).sae_out
+            output_variance += (sae_out - sae_out.mean(0)).pow(2).sum(0)
+        # scale encoder weights
+        scale = self.cfg.scale_encoder_fvu * torch.sqrt(
+            torch.mean(total_variance) / torch.mean(output_variance)
+        )
+        # print(f"total_variance: {total_variance.mean():.3f}")
+        # print(f"output_variance: {output_variance.mean():.3f}")
+        # print(f"Encoder scale: {scale:.3f}")
+        self.encoder.weight.data *= scale
+        self.encoder.bias.data *= scale
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):

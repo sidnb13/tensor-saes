@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Hydra
+outputs/
+multirun/
+
 # C extensions
 *.so
 

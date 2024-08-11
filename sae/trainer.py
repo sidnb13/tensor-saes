@@ -214,6 +214,13 @@ class SaeTrainer:
                 if raw.cfg.normalize_decoder:
                     raw.set_decoder_norm_to_unit_norm()
 
+                if raw.cfg.scale_encoder_k:
+                    raw.scale_encoder_k()
+
+                if raw.cfg.scale_encoder_fvu:
+                    all_hiddens = self.maybe_all_cat(hiddens)
+                    raw.scale_encoder_fvu(all_hiddens, self.cfg.micro_acc_steps)
+
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
                 denom = acc_steps * self.cfg.wandb_log_frequency
                 wrapped = maybe_wrapped[name]
@@ -441,8 +448,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 N = model.config.num_hidden_layers
                 cfg.layers = [tuple(range(N))]
             else:
-                # TODO: temp hack because parsing doesn't support nested lists
-                cfg.layers = [tuple(sorted(cfg.layers))]
+                cfg.layers = [sorted(lyr) for lyr in cfg.layers]
 
             # Now convert layers to hookpoints
             layers_name, _ = get_layer_list(model)
@@ -630,6 +636,13 @@ class SaeLayerRangeTrainer(SaeTrainer):
                         else self.saes
                     )
 
+                    if raw.cfg.scale_encoder_k:
+                        raw.scale_encoder_k()
+
+                    if raw.cfg.scale_encoder_fvu:
+                        all_hiddens = self.maybe_all_cat(hiddens)
+                        raw.scale_encoder_fvu(all_hiddens, self.cfg.micro_acc_steps)
+
                 # Make sure the W_dec is still unit-norm
                 if raw.cfg.normalize_decoder:
                     raw.set_decoder_norm_to_unit_norm()
@@ -731,6 +744,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
+                    avg_loss.clear()
 
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]

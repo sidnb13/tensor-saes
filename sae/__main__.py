@@ -3,11 +3,15 @@ from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from multiprocessing import cpu_count
 
+import hydra
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
-from simple_parsing import field, parse
+from omegaconf import DictConfig, OmegaConf
+from simple_parsing import field
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
+
+from sae.config import SaeConfig
 
 from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
@@ -96,7 +100,7 @@ def load_artifacts(
                 dataset,
                 tokenizer,
                 max_seq_len=args.ctx_len,
-                num_proc=args.data_preprocessing_num_proc,
+                num_proc=args.data_preprocessing_num_proc or os.cpu_count(),
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")
@@ -109,7 +113,8 @@ def load_artifacts(
     return model, dataset
 
 
-def run():
+@hydra.main(version_base=None, config_path="../config", config_name="config")
+def run(cfg: DictConfig):
     local_rank = os.environ.get("LOCAL_RANK")
     ddp = local_rank is not None
     rank = int(local_rank) if ddp else 0
@@ -121,7 +126,10 @@ def run():
         if rank == 0:
             print(f"Using DDP across {dist.get_world_size()} GPUs.")
 
-    args = parse(RunConfig)
+    # Convert Hydra config to RunConfig
+    parsed_config = OmegaConf.to_container(cfg, resolve=True)
+    sae_config = parsed_config.pop("sae")
+    args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)
 
     # Awkward hack to prevent other ranks from duplicating data preprocessing
     if not ddp or rank == 0:
