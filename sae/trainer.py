@@ -94,7 +94,9 @@ class SaeTrainer:
 
         self.optimizer = Adam(pgs)
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
+            self.optimizer,
+            cfg.lr_warmup_steps,
+            num_examples // (cfg.batch_size * cfg.micro_acc_steps),
         )
 
     def fit(self):
@@ -304,6 +306,7 @@ class SaeTrainer:
                                 f"loss/{name}": avg_loss[name],
                                 f"lr/{name}": self.optimizer.param_groups[i]["lr"],
                                 f"grad_norm/{name}": grad_norms[name],
+                                "step": step,
                             }
                         )
                         if self.cfg.auxk_alpha > 0:
@@ -323,6 +326,9 @@ class SaeTrainer:
 
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save()
+
+        if rank_zero and self.cfg.log_to_wandb:
+            wandb.finish()
 
         self.save()
         pbar.close()
@@ -737,6 +743,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                                     "lr"
                                 ],
                                 f"grad_norm/{names_str}": grad_norms[names],
+                                "step": step,
                             }
                         )
                         if self.cfg.auxk_alpha > 0:
@@ -756,6 +763,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save()
+
+        if rank_zero and self.cfg.log_to_wandb:
+            wandb.finish()
 
         self.save()
         pbar.close()

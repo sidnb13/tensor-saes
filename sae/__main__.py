@@ -1,6 +1,7 @@
 import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
+from datetime import datetime
 from multiprocessing import cpu_count
 
 import hydra
@@ -131,6 +132,12 @@ def run(cfg: DictConfig):
     sae_config = parsed_config.pop("sae")
     args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)
 
+    if rank == 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.run_name = f"{args.run_name}_{timestamp}"
+    else:
+        timestamp = None
+
     # Awkward hack to prevent other ranks from duplicating data preprocessing
     if not ddp or rank == 0:
         model, dataset = load_artifacts(args, rank)
@@ -140,6 +147,8 @@ def run(cfg: DictConfig):
             model, dataset = load_artifacts(args, rank)
         dataset = dataset.shard(dist.get_world_size(), rank)
 
+    total_tokens = len(dataset) * args.ctx_len
+
     trainer_cls = (
         SaeTrainer if not args.enable_cross_layer_training else SaeLayerRangeTrainer
     )
@@ -148,6 +157,7 @@ def run(cfg: DictConfig):
     with nullcontext() if rank == 0 else redirect_stdout(None):
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
+        print(f"Num tokens in dataset: {total_tokens:,}")
         trainer = trainer_cls(args, dataset, model)
         print(f"SAEs: {trainer.saes}")
         trainer.fit()
