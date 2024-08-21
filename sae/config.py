@@ -75,6 +75,9 @@ class TrainConfig(Serializable):
     ddp: bool = False
     """Use DDP for training."""
 
+    optimizer: str = "adam"
+    """Optimizer to use."""
+
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 

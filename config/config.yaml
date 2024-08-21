@@ -14,6 +14,8 @@ data_preprocessing_num_proc: 48
 ddp: false
 tp: false
 
+optimizer: zero
+
 sae:
   expansion_factor: 32
   normalize_decoder: true

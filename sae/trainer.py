@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from natsort import natsorted
 from torch import Tensor, nn
+from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
@@ -93,7 +94,12 @@ class SaeTrainer:
             print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
             print("Run `pip install bitsandbytes` for less memory usage.")
 
-        self.optimizer = Adam(pgs)
+        print(f"Using optimizer: {cfg.optimizer}")
+
+        if cfg.optimizer == "adam":
+            self.optimizer = Adam(pgs)
+        elif cfg.optimizer == "zero":
+            self.optimizer = ZeroRedundancyOptimizer(pgs)
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             cfg.lr_warmup_steps,
@@ -529,7 +535,13 @@ class SaeLayerRangeTrainer(SaeTrainer):
             print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
             print("Run `pip install bitsandbytes` for less memory usage.")
 
-        self.optimizer = Adam(pgs)
+        print(f"Using optimizer: {cfg.optimizer}")
+
+        if cfg.optimizer == "adam":
+            self.optimizer = Adam(pgs)
+        elif cfg.optimizer == "zero":
+            self.optimizer = ZeroRedundancyOptimizer(pgs, Adam)
+
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
