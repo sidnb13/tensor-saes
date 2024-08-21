@@ -10,6 +10,7 @@ from huggingface_hub import snapshot_download
 from natsort import natsorted
 from safetensors.torch import load_model, save_model
 from torch import Tensor, nn
+from torch.distributed._tensor import DTensor, Replicate
 
 from .config import SaeConfig
 from .utils import decoder_impl
@@ -58,10 +59,18 @@ class Sae(nn.Module):
         self.encoder.bias.data.zero_()
 
         self.W_dec = nn.Parameter(self.encoder.weight.data.clone()) if decoder else None
+
         if decoder and self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+        self.tp_mesh = None
+
+    def handle_dec_bias(self, x: torch.Tensor, op="add"):
+        if isinstance(self.b_dec, DTensor):
+            x = DTensor.from_local(x, self.tp_mesh, placements=[Replicate()])
+
+        return x + self.b_dec if op == "add" else x - self.b_dec
 
     @staticmethod
     def load_many(
@@ -171,7 +180,7 @@ class Sae(nn.Module):
 
     def pre_acts(self, x: Tensor) -> Tensor:
         # Remove decoder bias as per Anthropic
-        sae_in = x.to(self.dtype) - self.b_dec
+        sae_in = self.handle_dec_bias(x.to(self.dtype), op="sub")
         out = self.encoder(sae_in)
 
         return nn.functional.relu(out) if not self.cfg.signed else out
@@ -193,8 +202,13 @@ class Sae(nn.Module):
     def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
-        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
-        return y + self.b_dec
+        if self.tp_mesh is not None:
+            wdec = DTensor.to_local(self.W_dec).mT
+        else:
+            wdec = self.W_dec.mT
+
+        y = decoder_impl(top_indices, top_acts.to(self.dtype), wdec)
+        return self.handle_dec_bias(y, op="add")
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
         pre_acts = self.pre_acts(x)
@@ -202,6 +216,10 @@ class Sae(nn.Module):
 
         # Decode and compute residual
         sae_out = self.decode(top_acts, top_indices)
+
+        if self.tp_mesh is not None:
+            sae_out = DTensor.to_local(sae_out)
+
         e = sae_out - x
 
         # Used as a denominator for putting everything on a reasonable scale
@@ -274,7 +292,7 @@ class Sae(nn.Module):
 
         eps = torch.finfo(self.W_dec.dtype).eps
         norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
-        self.W_dec.data /= norm + eps
+        self.W_dec /= norm + eps
 
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):

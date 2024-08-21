@@ -69,6 +69,12 @@ class TrainConfig(Serializable):
     distribute_modules: bool = False
     """Store a single copy of each SAE, instead of copying them across devices."""
 
+    tp: bool = False
+    """Use TP for training."""
+
+    ddp: bool = False
+    """Use DDP for training."""
+
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 

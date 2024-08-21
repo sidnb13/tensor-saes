@@ -1,14 +1,37 @@
+import os
 from collections import defaultdict
 from functools import partial
-import os
 from typing import Any, Type, TypeVar, cast
 
 import torch
 from accelerate.utils import send_to_device
 from torch import Tensor, nn
+from torch.distributed._tensor import Replicate, distribute_tensor, init_device_mesh
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    parallelize_module,
+)
 from transformers import PreTrainedModel
 
 T = TypeVar("T")
+
+
+def configure_model(model, world_size: int):
+    tp_mesh = init_device_mesh("cuda", (world_size,))
+    tp_plan = {
+        "encoder": ColwiseParallel(),
+    }
+    model = parallelize_module(model, tp_mesh, tp_plan)
+
+    w_dec_shard = nn.Parameter(distribute_tensor(model.W_dec.data, tp_mesh))
+    model.register_parameter("W_dec", w_dec_shard)
+    b_dec_repl = nn.Parameter(
+        distribute_tensor(model.b_dec.data, tp_mesh, placements=[Replicate()])
+    )
+    model.register_parameter("b_dec", b_dec_repl)
+    model.tp_mesh = tp_mesh
+
+    return model
 
 
 def assert_type(typ: Type[T], obj: Any) -> T:

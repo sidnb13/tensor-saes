@@ -15,6 +15,7 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 from .config import TrainConfig
 from .sae import Sae
 from .utils import (
+    configure_model,
     geometric_median,
     get_layer_list,
     resolve_widths,
@@ -432,7 +433,14 @@ class SaeTrainer:
 
 
 class SaeLayerRangeTrainer(SaeTrainer):
-    def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
+    def __init__(
+        self,
+        cfg: TrainConfig,
+        dataset: Dataset,
+        model: PreTrainedModel,
+        rank,
+        world_size,
+    ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -484,11 +492,20 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 f"`distribute_modules=True`, got {unique_widths}"
             )
 
+        self.rank = rank
+        self.world_size = world_size
+
         self.model = model
         self.saes = {
             hook_segment: Sae(input_widths[hook_segment], cfg.sae, device)
             for hook_segment in self.local_hookpoints()
         }
+
+        if self.cfg.tp:
+            self.saes = {
+                hook_segment: configure_model(sae, self.world_size)
+                for hook_segment, sae in self.saes.items()
+            }
 
         pgs = [
             {
@@ -522,7 +539,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
         torch.set_float32_matmul_precision("high")
 
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
-        ddp = dist.is_initialized() and not self.cfg.distribute_modules
+        ddp = self.cfg.ddp and dist.is_initialized() and not self.cfg.distribute_modules
 
         if self.cfg.log_to_wandb and rank_zero:
             try:
@@ -689,6 +706,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     self.maybe_all_reduce(
                         did_fire[names], "max"
                     )  # max is boolean "any"
+
+                # print({k: (type(x), x.shape) for k, x in raw.named_parameters()})
+                # exit(0)
 
                 # Clip gradient norm independently for each SAE
                 grad_norms[names] = torch.nn.utils.clip_grad_norm_(

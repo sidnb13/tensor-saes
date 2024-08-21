@@ -199,6 +199,9 @@ def triton_sparse_dense_matmul(
     K = sparse_indices.shape[1]
     B = dense.shape[1]
 
+    # print("types", type(sparse_indices), type(sparse_values), type(dense))
+    # print(f"A: {A}, K: {K}, B: {B}")
+
     out = torch.zeros(A, B, device=dense.device, dtype=sparse_values.dtype)
 
     triton_sparse_dense_matmul_kernel[(A,)](

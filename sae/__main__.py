@@ -52,6 +52,9 @@ class RunConfig(TrainConfig):
     )
     """Number of processes to use for preprocessing data"""
 
+    # distributed
+    ddp: bool = False
+
 
 def load_artifacts(
     args: RunConfig, rank: int
@@ -116,9 +119,10 @@ def load_artifacts(
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def run(cfg: DictConfig):
-    local_rank = os.environ.get("LOCAL_RANK")
-    ddp = local_rank is not None
-    rank = int(local_rank) if ddp else 0
+    local_rank = os.environ.get("LOCAL_RANK", 0)
+    ddp, tp = cfg.ddp, cfg.tp
+    rank = int(local_rank)
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
 
     if ddp:
         torch.cuda.set_device(int(local_rank))
@@ -126,6 +130,8 @@ def run(cfg: DictConfig):
 
         if rank == 0:
             print(f"Using DDP across {dist.get_world_size()} GPUs.")
+    if tp and rank == 0:
+        print(f"Using TP across {world_size} GPUs.")
 
     # Convert Hydra config to RunConfig
     parsed_config = OmegaConf.to_container(cfg, resolve=True)
@@ -139,7 +145,7 @@ def run(cfg: DictConfig):
         timestamp = None
 
     # Awkward hack to prevent other ranks from duplicating data preprocessing
-    if not ddp or rank == 0:
+    if tp or not ddp or rank == 0:
         model, dataset = load_artifacts(args, rank)
     if ddp:
         dist.barrier()
@@ -158,7 +164,7 @@ def run(cfg: DictConfig):
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
         print(f"Num tokens in dataset: {total_tokens:,}")
-        trainer = trainer_cls(args, dataset, model)
+        trainer = trainer_cls(args, dataset, model, rank, world_size)
         print(f"SAEs: {trainer.saes}")
         trainer.fit()
 
