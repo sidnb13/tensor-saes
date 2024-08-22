@@ -16,7 +16,7 @@ from transformers import PreTrainedModel
 T = TypeVar("T")
 
 
-def configure_model(model, world_size: int):
+def configure_tp_model(model, world_size: int):
     tp_mesh = init_device_mesh("cuda", (world_size,))
     tp_plan = {
         "encoder": ColwiseParallel(),

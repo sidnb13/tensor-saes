@@ -18,6 +18,7 @@ LOG_TO_WANDB=False
 MAX_EXAMPLES=-1
 K=256
 RUN_NAME="fvu-scaling-cross-test"
+EXPANSION_FACTOR=8
 
 export WANDB_PROJECT="sae-experiments"
 export WANDB_ENTITY="michaelsklar"
@@ -25,6 +26,8 @@ export WANDB_ENTITY="michaelsklar"
 # Distributed stuff
 NPROC_PER_NODE=$(nvidia-smi --query-gpu=count --format=csv,noheader | wc -l)
 COMMA_COUNT=$(echo $CUDA_VISIBLE_DEVICES | grep -o ',' | tr -d " \n" | wc -c)
+LAUNCHER="torchrun --nnodes 1 --nproc_per_node $NPROC_PER_NODE"
+
 if [ $COMMA_COUNT -gt 0 ]; then
     NPROC_PER_NODE=$(($COMMA_COUNT + 1))
     LAUNCHER="torchrun --nnodes 1 --nproc_per_node $NPROC_PER_NODE"
@@ -42,6 +45,7 @@ CMD="-m sae \
     root_path=checkpoints/cross-layer-test \
     sae.scale_encoder_fvu=0.2 \
     sae.k=$K \
+    sae.expansion_factor=$EXPANSION_FACTOR \
     'layers=[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]' \
     split=$SPLIT \
     ctx_len=$CTX_LEN \

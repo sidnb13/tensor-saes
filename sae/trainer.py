@@ -16,7 +16,7 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 from .config import TrainConfig
 from .sae import Sae
 from .utils import (
-    configure_model,
+    configure_tp_model,
     geometric_median,
     get_layer_list,
     resolve_widths,
@@ -509,7 +509,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
         if self.cfg.tp:
             self.saes = {
-                hook_segment: configure_model(sae, self.world_size)
+                hook_segment: configure_tp_model(sae, self.world_size)
                 for hook_segment, sae in self.saes.items()
             }
 
