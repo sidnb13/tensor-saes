@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 import os
+import torch.nn.functional as F
 
 from .config import TrainConfig
 from .sae import Sae
@@ -590,6 +591,18 @@ class SaeLayerRangeTrainer(SaeTrainer):
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
+        def log_parameter_norms(sae, names_str, info):
+            with torch.no_grad():
+                encoder_norm = torch.norm(sae.encoder.weight).item()
+                decoder_norm = torch.norm(sae.W_dec).item()
+                bias_norm = sae.b_dec.norm().item()
+
+                info.update({
+                    f"encoder_norm/{names_str}": encoder_norm,
+                    f"decoder_norm/{names_str}": decoder_norm,
+                    f"bias_norm/{names_str}": bias_norm,
+                })
+
         device = self.model.device
         dl = DataLoader(
             self.dataset,
@@ -796,6 +809,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
                         )
                         if self.cfg.auxk_alpha > 0:
                             info[f"auxk/{names}"] = avg_auxk_loss[names]
+
+                        # Log parameter norms
+                        log_parameter_norms(self.saes[names], names_str, info)
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
