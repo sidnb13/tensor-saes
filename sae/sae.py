@@ -12,8 +12,6 @@ from safetensors.torch import load_model, save_model
 from torch import Tensor, nn
 from torch.distributed._tensor import DTensor, Replicate
 
-
-
 from .config import SaeConfig
 from .utils import decoder_impl
 
@@ -164,6 +162,7 @@ class Sae(nn.Module):
 
         # save_model(self, str(path / "sae.safetensors"))
         import pickle
+
         with open(str(path / "sae.pkl"), "wb") as f:
             pickle.dump(self, f)
         with open(path / "cfg.json", "w") as f:
@@ -297,7 +296,7 @@ class Sae(nn.Module):
 
         eps = torch.finfo(self.W_dec.dtype).eps
         norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
-        self.W_dec /= norm + eps
+        self.W_dec.data /= norm + eps
 
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):

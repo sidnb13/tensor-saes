@@ -16,6 +16,21 @@ from transformers import PreTrainedModel
 T = TypeVar("T")
 
 
+def log_parameter_norms(sae, names_str, info):
+    with torch.no_grad():
+        encoder_norm = torch.norm(sae.encoder.weight).item()
+        decoder_norm = torch.norm(sae.W_dec).item()
+        bias_norm = sae.b_dec.norm().item()
+
+        info.update(
+            {
+                f"encoder_norm/{names_str}": encoder_norm,
+                f"decoder_norm/{names_str}": decoder_norm,
+                f"bias_norm/{names_str}": bias_norm,
+            }
+        )
+
+
 def configure_tp_model(model, world_size: int):
     tp_mesh = init_device_mesh("cuda", (world_size,))
     tp_plan = {

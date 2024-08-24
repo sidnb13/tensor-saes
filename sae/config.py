@@ -87,6 +87,7 @@ class TrainConfig(Serializable):
     log_to_wandb: bool = True
     run_name: str | None = None
     wandb_log_frequency: int = 1
+    stdout_log_frequency: int = 10
 
     def __post_init__(self):
         assert not (

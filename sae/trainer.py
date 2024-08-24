@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -5,16 +6,15 @@ from typing import Sized
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from natsort import natsorted
 from torch import Tensor, nn
-from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed._tensor import DTensor
+from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
-import os
-import torch.nn.functional as F
 
 from .config import TrainConfig
 from .sae import Sae
@@ -22,13 +22,21 @@ from .utils import (
     configure_tp_model,
     geometric_median,
     get_layer_list,
+    log_parameter_norms,
     resolve_widths,
     resolve_widths_rangewise,
 )
 
 
 class SaeTrainer:
-    def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
+    def __init__(
+        self,
+        cfg: TrainConfig,
+        dataset: Dataset,
+        model: PreTrainedModel,
+        *args,
+        **kwargs,
+    ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -101,8 +109,8 @@ class SaeTrainer:
 
         if cfg.optimizer == "adam":
             self.optimizer = Adam(pgs)
-        elif cfg.optimizer == "zero":
-            self.optimizer = ZeroRedundancyOptimizer(pgs)
+        elif cfg.optimizer == "adam_zero":
+            self.optimizer = ZeroRedundancyOptimizer(pgs, Adam)
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             cfg.lr_warmup_steps,
@@ -295,37 +303,47 @@ class SaeTrainer:
                     for mask in did_fire.values():
                         mask.zero_()
 
-                if (
-                    self.cfg.log_to_wandb
-                    and (step + 1) % self.cfg.wandb_log_frequency == 0
-                ):
-                    info = {}
+                info = {}
 
-                    for i, name in enumerate(self.saes):
-                        mask = (
-                            num_tokens_since_fired[name]
-                            > self.cfg.dead_feature_threshold
-                        )
+                for names in self.saes:
+                    mask = (
+                        num_tokens_since_fired[names] > self.cfg.dead_feature_threshold
+                    )
 
-                        info.update(
-                            {
-                                f"fvu/{name}": avg_fvu[name],
-                                f"dead_pct/{name}": mask.mean(
-                                    dtype=torch.float32
-                                ).item(),
-                                f"loss/{name}": avg_loss[name],
-                                f"lr/{name}": self.optimizer.param_groups[i]["lr"],
-                                f"grad_norm/{name}": grad_norms[name],
-                                "step": step,
-                            }
-                        )
-                        if self.cfg.auxk_alpha > 0:
-                            info[f"auxk/{name}"] = avg_auxk_loss[name]
+                    names_str = "_".join(names)
 
+                    info.update(
+                        {
+                            f"fvu/{names_str}": avg_fvu[names],
+                            f"dead_pct/{names_str}": mask.mean(
+                                dtype=torch.float32
+                            ).item(),
+                            f"loss/{names_str}": avg_loss[names],
+                            f"lr/{names_str}": self.optimizer.param_groups[-1]["lr"],
+                            f"grad_norm/{names_str}": grad_norms[names],
+                            "step": step,
+                        }
+                    )
+                    if self.cfg.auxk_alpha > 0:
+                        info[f"auxk/{names}"] = avg_auxk_loss[names]
+
+                    # Log parameter norms
+                    log_parameter_norms(self.saes[names], names_str, info)
+
+                if (step + 1) % min(
+                    self.cfg.stdout_log_frequency, self.cfg.wandb_log_frequency
+                ) == 0 and rank_zero:
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
                     avg_loss.clear()
 
+                if (step + 1) % self.cfg.stdout_log_frequency == 0 and rank_zero:
+                    print(info)
+
+                if (
+                    self.cfg.log_to_wandb
+                    and (step + 1) % self.cfg.wandb_log_frequency == 0
+                ):
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
                         dist.gather_object(info, outputs if rank_zero else None)
@@ -437,15 +455,19 @@ class SaeTrainer:
 
                 path = self.cfg.run_name or "checkpoints"
                 full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
-                
+
                 # Ensure the directory exists
                 os.makedirs(full_path, exist_ok=True)
 
                 # Save the state dict instead of pickling the entire object
                 sae_state = {
-                    'encoder': sae.encoder.state_dict(),
-                    'decoder': DTensor.to_local(sae.W_dec) if isinstance(sae.W_dec, DTensor) else sae.W_dec,
-                   'b_dec': DTensor.to_local(sae.b_dec) if isinstance(sae.b_dec, DTensor) else sae.b_dec,
+                    "encoder": sae.encoder.state_dict(),
+                    "decoder": DTensor.to_local(sae.W_dec)
+                    if isinstance(sae.W_dec, DTensor)
+                    else sae.W_dec,
+                    "b_dec": DTensor.to_local(sae.b_dec)
+                    if isinstance(sae.b_dec, DTensor)
+                    else sae.b_dec,
                 }
 
                 torch.save(sae_state, f"{full_path}/sae_state.pt")
@@ -525,6 +547,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
         }
 
         if self.cfg.tp:
+            print("Configuring tensor parallelism")
             self.saes = {
                 hook_segment: configure_tp_model(sae, self.world_size)
                 for hook_segment, sae in self.saes.items()
@@ -542,22 +565,29 @@ class SaeLayerRangeTrainer(SaeTrainer):
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
         print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
 
-        try:
-            from bitsandbytes.optim import Adam8bit as Adam  # type: ignore  # noqa: I001
+        if "8bit" in cfg.optimizer:
+            try:
+                from bitsandbytes.optim import Adam8bit as Adam  # type: ignore  # noqa: I001
+                from bitsandbytes.optim import AdamW8bit as AdamW  # type: ignore  # noqa: I001
 
-            print("Using 8-bit Adam from bitsandbytes")
-        except ImportError:
-            from torch.optim import Adam
+                print(f"Using 8-bit {cfg.optimizer} from bitsandbytes")
+            except ImportError:
+                from torch.optim import Adam, AdamW
 
-            print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
-            print("Run `pip install bitsandbytes` for less memory usage.")
+                print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
+                print("Run `pip install bitsandbytes` for less memory usage.")
+                print(f"Using optimizer: {cfg.optimizer}")
+        else:
+            from torch.optim import Adam, AdamW
 
-        print(f"Using optimizer: {cfg.optimizer}")
-
-        if cfg.optimizer == "adam":
+        if "adam" in cfg.optimizer:
             self.optimizer = Adam(pgs)
-        elif cfg.optimizer == "zero":
+        elif "adamw" in cfg.optimizer:
+            self.optimizer = AdamW(pgs)
+        elif cfg.optimizer == "adam_zero":
             self.optimizer = ZeroRedundancyOptimizer(pgs, Adam)
+        elif cfg.optimizer == "adamw_zero":
+            self.optimizer = ZeroRedundancyOptimizer(pgs, AdamW)
 
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
@@ -590,18 +620,6 @@ class SaeLayerRangeTrainer(SaeTrainer):
         num_model_params = sum(p.numel() for p in self.model.parameters())
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
-
-        def log_parameter_norms(sae, names_str, info):
-            with torch.no_grad():
-                encoder_norm = torch.norm(sae.encoder.weight).item()
-                decoder_norm = torch.norm(sae.W_dec).item()
-                bias_norm = sae.b_dec.norm().item()
-
-                info.update({
-                    f"encoder_norm/{names_str}": encoder_norm,
-                    f"decoder_norm/{names_str}": decoder_norm,
-                    f"bias_norm/{names_str}": bias_norm,
-                })
 
         device = self.model.device
         dl = DataLoader(
@@ -715,6 +733,10 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 denom = acc_steps * self.cfg.wandb_log_frequency
                 wrapped = maybe_wrapped[names]
 
+                if self.cfg.tp:
+                    # Each rank should receive same data
+                    hiddens = self.maybe_all_cat(hiddens)
+
                 # Save memory by chunking the activations
                 for chunk in hiddens.chunk(self.cfg.micro_acc_steps):
                     out = wrapped(
@@ -779,44 +801,47 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     for mask in did_fire.values():
                         mask.zero_()
 
-                if (
-                    self.cfg.log_to_wandb
-                    and (step + 1) % self.cfg.wandb_log_frequency == 0
-                ):
-                    info = {}
+                info = {}
 
-                    for names in self.saes:
-                        mask = (
-                            num_tokens_since_fired[names]
-                            > self.cfg.dead_feature_threshold
-                        )
+                for names in self.saes:
+                    mask = (
+                        num_tokens_since_fired[names] > self.cfg.dead_feature_threshold
+                    )
 
-                        names_str = "_".join(names)
+                    names_str = "_".join(names)
 
-                        info.update(
-                            {
-                                f"fvu/{names_str}": avg_fvu[names],
-                                f"dead_pct/{names_str}": mask.mean(
-                                    dtype=torch.float32
-                                ).item(),
-                                f"loss/{names_str}": avg_loss[names],
-                                f"lr/{names_str}": self.optimizer.param_groups[-1][
-                                    "lr"
-                                ],
-                                f"grad_norm/{names_str}": grad_norms[names],
-                                "step": step,
-                            }
-                        )
-                        if self.cfg.auxk_alpha > 0:
-                            info[f"auxk/{names}"] = avg_auxk_loss[names]
+                    info.update(
+                        {
+                            f"fvu/{names_str}": avg_fvu[names],
+                            f"dead_pct/{names_str}": mask.mean(
+                                dtype=torch.float32
+                            ).item(),
+                            f"loss/{names_str}": avg_loss[names],
+                            f"lr/{names_str}": self.optimizer.param_groups[-1]["lr"],
+                            f"grad_norm/{names_str}": grad_norms[names],
+                            "step": step,
+                        }
+                    )
+                    if self.cfg.auxk_alpha > 0:
+                        info[f"auxk/{names}"] = avg_auxk_loss[names]
 
-                        # Log parameter norms
-                        log_parameter_norms(self.saes[names], names_str, info)
+                    # Log parameter norms
+                    log_parameter_norms(self.saes[names], names_str, info)
 
+                if (step + 1) % min(
+                    self.cfg.stdout_log_frequency, self.cfg.wandb_log_frequency
+                ) == 0 and rank_zero:
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
                     avg_loss.clear()
 
+                if (step + 1) % self.cfg.stdout_log_frequency == 0 and rank_zero:
+                    print(info)
+
+                if (
+                    self.cfg.log_to_wandb
+                    and (step + 1) % self.cfg.wandb_log_frequency == 0
+                ):
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
                         dist.gather_object(info, outputs if rank_zero else None)
@@ -851,15 +876,19 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                 path = self.cfg.run_name or "checkpoints"
                 full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
-                
+
                 # Ensure the directory exists
                 os.makedirs(full_path, exist_ok=True)
 
                 # Save the state dict instead of pickling the entire object
                 sae_state = {
-                    'encoder': sae.encoder.state_dict(),
-                    'decoder': DTensor.to_local(sae.W_dec) if isinstance(sae.W_dec, DTensor) else sae.W_dec,
-                    'b_dec': DTensor.to_local(sae.b_dec) if isinstance(sae.b_dec, DTensor) else sae.b_dec,
+                    "encoder": sae.encoder.state_dict(),
+                    "decoder": DTensor.to_local(sae.W_dec)
+                    if isinstance(sae.W_dec, DTensor)
+                    else sae.W_dec,
+                    "b_dec": DTensor.to_local(sae.b_dec)
+                    if isinstance(sae.b_dec, DTensor)
+                    else sae.b_dec,
                 }
 
                 torch.save(sae_state, f"{full_path}/sae_state.pt")

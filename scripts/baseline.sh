@@ -12,7 +12,7 @@ LR_WARMUP_STEPS=500
 LR=1e-4
 AUXK_ALPHA=0.0
 DEAD_FEATURE_THRESHOLD=100000
-LOG_TO_WANDB=True
+LOG_TO_WANDB=False
 MAX_EXAMPLES=10000000
 # MAX_EXAMPLES=8192
 K=256
@@ -27,7 +27,7 @@ python -m sae \
     model=$MODEL \
     dataset=$DATASET \
     sae.k=$K \
-    sae.scale_encoder_fvu=0.27,0.3,0.33,0.36 \
+    sae.scale_encoder_fvu=0.2 \
     layers=[8] \
     split=$SPLIT \
     ctx_len=$CTX_LEN \
@@ -40,4 +40,7 @@ python -m sae \
     auxk_alpha=$AUXK_ALPHA \
     dead_feature_threshold=$DEAD_FEATURE_THRESHOLD \
     run_name=encoder_scale_fvu_test \
-    log_to_wandb=$LOG_TO_WANDB
+    log_to_wandb=$LOG_TO_WANDB \
+    optimizer=adam_zero \
+    stdout_log_frequency=1 \
+    sae.signed=false
