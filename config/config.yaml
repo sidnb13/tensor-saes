@@ -4,6 +4,7 @@ defaults:
 model: gpt2
 dataset: togethercomputer/RedPajama-Data-1T-Sample
 split: train
+ds_name: null
 ctx_len: 64
 hf_token: null
 load_in_8bit: false

@@ -34,6 +34,9 @@ class RunConfig(TrainConfig):
 
     split: str = "train"
     """Dataset split to use for training."""
+    
+    ds_name: str | None = None
+    """Dataset name to use when loading from huggingface."""
 
     ctx_len: int = 2048
     """Context length to use for training."""
@@ -86,6 +89,7 @@ def load_artifacts(
         try:
             dataset = load_dataset(
                 args.dataset,
+                name=args.ds_name,
                 split=args.split,
                 # TODO: Maybe set this to False by default? But RPJ requires it.
                 trust_remote_code=True,
