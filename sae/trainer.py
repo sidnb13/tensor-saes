@@ -8,10 +8,12 @@ import torch.distributed as dist
 from natsort import natsorted
 from torch import Tensor, nn
 from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.distributed._tensor import DTensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
+import os
 
 from .config import TrainConfig
 from .sae import Sae
@@ -418,7 +420,7 @@ class SaeTrainer:
         return {hook: buffer[:, i] for i, hook in enumerate(local_hooks)}
 
     def save(self):
-        """Save the SAEs to disk."""
+        """Save to disk."""
 
         if (
             self.cfg.distribute_modules
@@ -430,8 +432,22 @@ class SaeTrainer:
             for hook, sae in self.saes.items():
                 assert isinstance(sae, Sae)
 
+                hook_name = "_".join(hook)
+
                 path = self.cfg.run_name or "checkpoints"
-                sae.save_to_disk(f"{self.cfg.root_path}/{path}/{hook}")
+                full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
+                
+                # Ensure the directory exists
+                os.makedirs(full_path, exist_ok=True)
+
+                # Save the state dict instead of pickling the entire object
+                sae_state = {
+                    'encoder': sae.encoder.state_dict(),
+                    'decoder': DTensor.to_local(sae.W_dec) if isinstance(sae.W_dec, DTensor) else sae.W_dec,
+                   'b_dec': DTensor.to_local(sae.b_dec) if isinstance(sae.b_dec, DTensor) else sae.b_dec,
+                }
+
+                torch.save(sae_state, f"{full_path}/sae_state.pt")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():
@@ -818,7 +834,19 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 hook_name = "_".join(hook)
 
                 path = self.cfg.run_name or "checkpoints"
-                sae.save_to_disk(f"{self.cfg.root_path}/{path}/{hook_name}")
+                full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
+                
+                # Ensure the directory exists
+                os.makedirs(full_path, exist_ok=True)
+
+                # Save the state dict instead of pickling the entire object
+                sae_state = {
+                    'encoder': sae.encoder.state_dict(),
+                    'decoder': DTensor.to_local(sae.W_dec) if isinstance(sae.W_dec, DTensor) else sae.W_dec,
+                    'b_dec': DTensor.to_local(sae.b_dec) if isinstance(sae.b_dec, DTensor) else sae.b_dec,
+                }
+
+                torch.save(sae_state, f"{full_path}/sae_state.pt")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():

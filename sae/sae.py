@@ -160,7 +160,10 @@ class Sae(nn.Module):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        save_model(self, str(path / "sae.safetensors"))
+        # save_model(self, str(path / "sae.safetensors"))
+        import pickle
+        with open(str(path / "sae.pkl"), "wb") as f:
+            pickle.dump(self, f)
         with open(path / "cfg.json", "w") as f:
             json.dump(
                 {
