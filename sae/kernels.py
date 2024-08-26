@@ -199,8 +199,8 @@ def triton_sparse_dense_matmul(
     K = sparse_indices.shape[1]
     B = dense.shape[1]
 
-    # print("types", type(sparse_indices), type(sparse_values), type(dense))
-    # print(f"A: {A}, K: {K}, B: {B}")
+    # logger.info("types", type(sparse_indices), type(sparse_values), type(dense))
+    # logger.info(f"A: {A}, K: {K}, B: {B}")
 
     out = torch.zeros(A, B, device=dense.device, dtype=sparse_values.dtype)
 
@@ -311,7 +311,7 @@ def triton_dense_dense_sparseout_matmul(
     assert dense2.stride(0) == 1, "dense2 must be contiguous along B"
 
     if K > 512:
-        # print("WARN - using naive matmul for large K")
+        # logger.info("WARN - using naive matmul for large K")
         # naive is more efficient for large K
         return (dense1 @ dense2).gather(1, at_indices)
 

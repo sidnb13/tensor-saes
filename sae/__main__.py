@@ -15,7 +15,10 @@ from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTraine
 from sae.config import SaeConfig
 
 from .data import MemmapDataset, chunk_and_tokenize
+from .logger import get_logger
 from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -111,7 +114,7 @@ def load_artifacts(
                 num_proc=args.data_preprocessing_num_proc or os.cpu_count(),
             )
         else:
-            print("Dataset already tokenized; skipping tokenization.")
+            logger.info("Dataset already tokenized; skipping tokenization.")
 
         dataset = dataset.with_format("torch")
 
@@ -133,9 +136,9 @@ def run(cfg: DictConfig):
         dist.init_process_group("nccl")
 
         if rank == 0:
-            print(f"Using DDP across {dist.get_world_size()} GPUs.")
+            logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
     if tp and rank == 0:
-        print(f"Using TP across {world_size} GPUs.")
+        logger.info(f"Using TP across {world_size} GPUs.")
 
     # Convert Hydra config to RunConfig
     parsed_config = OmegaConf.to_container(cfg, resolve=True)
@@ -163,14 +166,12 @@ def run(cfg: DictConfig):
         SaeTrainer if not args.enable_cross_layer_training else SaeLayerRangeTrainer
     )
 
-    # Prevent ranks other than 0 from printing
-    with nullcontext() if rank == 0 else redirect_stdout(None):
-        print(f"Training on '{args.dataset}' (split '{args.split}')")
-        print(f"Storing model weights in {model.dtype}")
-        print(f"Num tokens in dataset: {total_tokens:,}")
-        trainer = trainer_cls(args, dataset, model, rank, world_size)
-        print(f"SAEs: {trainer.saes}")
-        trainer.fit()
+    logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
+    logger.info(f"Storing model weights in {model.dtype}")
+    logger.info(f"Num tokens in dataset: {total_tokens:,}")
+    trainer = trainer_cls(args, dataset, model, rank, world_size)
+    logger.info(f"SAEs: {trainer.saes}")
+    trainer.fit()
 
 
 if __name__ == "__main__":

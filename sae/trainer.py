@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
+from .logger import get_logger
 from .sae import Sae
 from .utils import (
     configure_tp_model,
@@ -26,6 +27,8 @@ from .utils import (
     resolve_widths,
     resolve_widths_rangewise,
 )
+
+logger = get_logger(__name__)
 
 
 class SaeTrainer:
@@ -93,19 +96,21 @@ class SaeTrainer:
         ]
         # Dedup the learning rates we're using, sort them, round to 2 decimal places
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
-        print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
+        logger.info(
+            f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}"
+        )
 
         try:
             from bitsandbytes.optim import Adam8bit as Adam  # type: ignore  # noqa: I001
 
-            print("Using 8-bit Adam from bitsandbytes")
+            logger.info("Using 8-bit Adam from bitsandbytes")
         except ImportError:
             from torch.optim import Adam
 
-            print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
-            print("Run `pip install bitsandbytes` for less memory usage.")
+            logger.info("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
+            logger.info("Run `pip install bitsandbytes` for less memory usage.")
 
-        print(f"Using optimizer: {cfg.optimizer}")
+        logger.info(f"Using optimizer: {cfg.optimizer}")
 
         if cfg.optimizer == "adam":
             self.optimizer = Adam(pgs)
@@ -135,15 +140,15 @@ class SaeTrainer:
                     save_code=True,
                 )
             except ImportError:
-                print("Weights & Biases not installed, skipping logging.")
+                logger.info("Weights & Biases not installed, skipping logging.")
                 self.cfg.log_to_wandb = False
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
         )
         num_model_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Number of SAE parameters: {num_sae_params:_}")
-        print(f"Number of model parameters: {num_model_params:_}")
+        logger.info(f"Number of SAE parameters: {num_sae_params:_}")
+        logger.info(f"Number of model parameters: {num_model_params:_}")
 
         device = self.model.device
         dl = DataLoader(
@@ -338,7 +343,7 @@ class SaeTrainer:
                     avg_loss.clear()
 
                 if (step + 1) % self.cfg.stdout_log_frequency == 0 and rank_zero:
-                    print(info)
+                    logger.info(info)
 
                 if (
                     self.cfg.log_to_wandb
@@ -397,8 +402,10 @@ class SaeTrainer:
         """Prepare a plan for distributing modules across ranks."""
         if not self.cfg.distribute_modules:
             self.module_plan = []
-            print(f"Training on modules: {self.cfg.hookpoints}")
+            logger.info(f"Training on modules: {self.cfg.hookpoints}")
             return
+
+        logger.info("Distributing modules across ranks")
 
         layers_per_rank, rem = divmod(len(self.cfg.hookpoints), dist.get_world_size())
         assert rem == 0, "Number of modules must be divisible by world size"
@@ -409,7 +416,7 @@ class SaeTrainer:
             for start in range(0, len(self.cfg.hookpoints), layers_per_rank)
         ]
         for rank, modules in enumerate(self.module_plan):
-            print(f"Rank {rank} modules: {modules}")
+            logger.info(f"Rank {rank} modules: {modules}")
 
     def scatter_hiddens(self, hidden_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         """Scatter & gather the hidden states across ranks."""
@@ -446,7 +453,7 @@ class SaeTrainer:
             or not dist.is_initialized()
             or dist.get_rank() == 0
         ):
-            print("Saving checkpoint")
+            logger.info("Saving checkpoint")
 
             for hook, sae in self.saes.items():
                 assert isinstance(sae, Sae)
@@ -547,7 +554,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
         }
 
         if self.cfg.tp:
-            print("Configuring tensor parallelism")
+            logger.info("Configuring tensor parallelism")
             self.saes = {
                 hook_segment: configure_tp_model(sae, self.world_size)
                 for hook_segment, sae in self.saes.items()
@@ -563,20 +570,24 @@ class SaeLayerRangeTrainer(SaeTrainer):
         ]
         # Dedup the learning rates we're using, sort them, round to 2 decimal places
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
-        print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
+        logger.info(
+            f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}"
+        )
 
         if "8bit" in cfg.optimizer:
             try:
                 from bitsandbytes.optim import Adam8bit as Adam  # type: ignore  # noqa: I001
                 from bitsandbytes.optim import AdamW8bit as AdamW  # type: ignore  # noqa: I001
 
-                print(f"Using 8-bit {cfg.optimizer} from bitsandbytes")
+                logger.info(f"Using 8-bit {cfg.optimizer} from bitsandbytes")
             except ImportError:
                 from torch.optim import Adam, AdamW
 
-                print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
-                print("Run `pip install bitsandbytes` for less memory usage.")
-                print(f"Using optimizer: {cfg.optimizer}")
+                logger.info(
+                    "bitsandbytes 8-bit Adam not available, using torch.optim.Adam"
+                )
+                logger.info("Run `pip install bitsandbytes` for less memory usage.")
+                logger.info(f"Using optimizer: {cfg.optimizer}")
         else:
             from torch.optim import Adam, AdamW
 
@@ -611,15 +622,15 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     save_code=True,
                 )
             except ImportError:
-                print("Weights & Biases not installed, skipping logging.")
+                logger.info("Weights & Biases not installed, skipping logging.")
                 self.cfg.log_to_wandb = False
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
         )
         num_model_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Number of SAE parameters: {num_sae_params:_}")
-        print(f"Number of model parameters: {num_model_params:_}")
+        logger.info(f"Number of SAE parameters: {num_sae_params:_}")
+        logger.info(f"Number of model parameters: {num_model_params:_}")
 
         device = self.model.device
         dl = DataLoader(
@@ -770,7 +781,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                         did_fire[names], "max"
                     )  # max is boolean "any"
 
-                # print({k: (type(x), x.shape) for k, x in raw.named_parameters()})
+                # logger.info({k: (type(x), x.shape) for k, x in raw.named_parameters()})
                 # exit(0)
 
                 # Clip gradient norm independently for each SAE
@@ -836,7 +847,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     avg_loss.clear()
 
                 if (step + 1) % self.cfg.stdout_log_frequency == 0 and rank_zero:
-                    print(info)
+                    logger.info(info)
 
                 if (
                     self.cfg.log_to_wandb

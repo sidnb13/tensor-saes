@@ -13,8 +13,10 @@ from torch.distributed.tensor.parallel import (
 )
 from transformers import PreTrainedModel
 
-T = TypeVar("T")
+from .logger import get_logger
 
+T = TypeVar("T")
+logger = get_logger(__name__)
 
 def log_parameter_norms(sae, names_str, info):
     with torch.no_grad():
@@ -180,10 +182,10 @@ try:
     from .kernels import TritonDecoder
 except ImportError:
     decoder_impl = eager_decode
-    print("Triton not installed, using eager implementation of SAE decoder.")
+    logger.info("Triton not installed, using eager implementation of SAE decoder.")
 else:
     if os.environ.get("SAE_DISABLE_TRITON") == "1":
-        print("Triton disabled, using eager implementation of SAE decoder.")
+        logger.info("Triton disabled, using eager implementation of SAE decoder.")
         decoder_impl = eager_decode
     else:
         decoder_impl = triton_decode

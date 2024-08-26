@@ -290,9 +290,9 @@ class Sae(nn.Module):
         scale = self.cfg.scale_encoder_fvu * torch.sqrt(
             torch.mean(total_variance) / torch.mean(output_variance)
         )
-        # print(f"total_variance: {total_variance.mean():.3f}")
-        # print(f"output_variance: {output_variance.mean():.3f}")
-        # print(f"Encoder scale: {scale:.3f}")
+        # logger.info(f"total_variance: {total_variance.mean():.3f}")
+        # logger.info(f"output_variance: {output_variance.mean():.3f}")
+        # logger.info(f"Encoder scale: {scale:.3f}")
         self.encoder.weight.data *= scale
         self.encoder.bias.data *= scale
 
