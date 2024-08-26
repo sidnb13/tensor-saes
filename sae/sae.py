@@ -164,16 +164,10 @@ class Sae(nn.Module):
         sae.b_dec = sae_weights["decoder.bias"]
         return sae
 
-    def save_to_disk(self, path: Path | str):
-        # TODO: sidnb13 this probably doesn't work with Trainer's saving
+    def save_config(self, path: Path | str):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
-        # save_model(self, str(path / "sae.safetensors"))
-        import pickle
-
-        with open(str(path / "sae.pkl"), "wb") as f:
-            pickle.dump(self, f)
         with open(path / "cfg.json", "w") as f:
             json.dump(
                 {

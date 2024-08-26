@@ -880,6 +880,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
             path = self.cfg.run_name or "checkpoints"
             full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
 
+            if self.rank == 0:
+                sae.save_config(full_path)
+
             # Save the state dict instead of pickling the entire object
             sae_state = {
                 "encoder.weight": DTensor.full_tensor(sae.encoder.weight),
