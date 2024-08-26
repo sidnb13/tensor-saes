@@ -150,8 +150,11 @@ class Sae(nn.Module):
             cfg = SaeConfig(**cfg_dict)
 
         sae = Sae(d_in, cfg, device=device, decoder=decoder)
-        sae_weights = torch.save(
-            str(path / ("sae.pt" if step is None else f"sae-{step}.pt")),
+        sae_weights = load_file(
+            str(
+                path
+                / ("sae.safetensors" if step is None else f"sae-{step}.safetensors")
+            ),
             map_location=str(device),
             # TODO: Maybe be more fine-grained about this in the future?
         )
@@ -290,9 +293,9 @@ class Sae(nn.Module):
         scale = self.cfg.scale_encoder_fvu * torch.sqrt(
             torch.mean(total_variance) / torch.mean(output_variance)
         )
-        # print(f"total_variance: {total_variance.mean():.3f}")
-        # print(f"output_variance: {output_variance.mean():.3f}")
-        # print(f"Encoder scale: {scale:.3f}")
+        # logger.info(f"total_variance: {total_variance.mean():.3f}")
+        # logger.info(f"output_variance: {output_variance.mean():.3f}")
+        # logger.info(f"Encoder scale: {scale:.3f}")
         self.encoder.weight.data *= scale
         self.encoder.bias.data *= scale
 

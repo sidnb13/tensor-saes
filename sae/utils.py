@@ -6,14 +6,23 @@ from typing import Any, Type, TypeVar, cast
 import torch
 from accelerate.utils import send_to_device
 from torch import Tensor, nn
-from torch.distributed._tensor import Replicate, distribute_tensor, init_device_mesh
+from torch.distributed._tensor import (
+    Replicate,
+    Shard,
+    distribute_tensor,
+    init_device_mesh,
+)
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
 )
 from transformers import PreTrainedModel
 
+from .logger import get_logger
+
 T = TypeVar("T")
+
+logger = get_logger(__name__)
 
 
 def log_parameter_norms(sae, names_str, info):
@@ -38,12 +47,21 @@ def configure_tp_model(model, world_size: int):
     }
     model = parallelize_module(model, tp_mesh, tp_plan)
 
-    w_dec_shard = nn.Parameter(distribute_tensor(model.W_dec.data, tp_mesh))
+    # Rowwise parallel sharding
+    w_dec_shard = nn.Parameter(
+        distribute_tensor(model.W_dec.data, tp_mesh, placements=[Shard(0)])
+    )
     model.register_parameter("W_dec", w_dec_shard)
     b_dec_repl = nn.Parameter(
         distribute_tensor(model.b_dec.data, tp_mesh, placements=[Replicate()])
     )
     model.register_parameter("b_dec", b_dec_repl)
+
+    from torch.distributed._tensor import DTensor
+
+    print("Encoder weight", DTensor.to_local(model.encoder.weight).shape)
+    print("W_dec", DTensor.to_local(model.W_dec).shape)
+
     model.tp_mesh = tp_mesh
 
     return model
@@ -180,10 +198,10 @@ try:
     from .kernels import TritonDecoder
 except ImportError:
     decoder_impl = eager_decode
-    print("Triton not installed, using eager implementation of SAE decoder.")
+    logger.info("Triton not installed, using eager implementation of SAE decoder.")
 else:
     if os.environ.get("SAE_DISABLE_TRITON") == "1":
-        print("Triton disabled, using eager implementation of SAE decoder.")
+        logger.info("Triton disabled, using eager implementation of SAE decoder.")
         decoder_impl = eager_decode
     else:
         decoder_impl = triton_decode
