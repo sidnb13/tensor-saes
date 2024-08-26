@@ -6,10 +6,10 @@ from typing import Sized
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from natsort import natsorted
 from torch import Tensor, nn
 from torch.distributed._tensor import DTensor
+from torch.distributed.checkpoint import FileSystemWriter, state_dict_saver
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
@@ -353,12 +353,12 @@ class SaeTrainer:
                         wandb.log(info, step=step)
 
                 if (step + 1) % self.cfg.save_every == 0:
-                    self.save()
+                    self.save(step)
 
         if rank_zero and self.cfg.log_to_wandb:
             wandb.finish()
 
-        self.save()
+        self.save(step)
         pbar.close()
 
     def local_hookpoints(self) -> list[str]:
@@ -438,7 +438,7 @@ class SaeTrainer:
         # Return a list of results, one for each layer
         return {hook: buffer[:, i] for i, hook in enumerate(local_hooks)}
 
-    def save(self):
+    def save(self, step: int):
         """Save to disk."""
 
         if (
@@ -851,47 +851,39 @@ class SaeLayerRangeTrainer(SaeTrainer):
                         wandb.log(info, step=step)
 
                 if (step + 1) % self.cfg.save_every == 0:
-                    self.save()
+                    self.save(step)
 
         if rank_zero and self.cfg.log_to_wandb:
             wandb.finish()
 
-        self.save()
+        self.save(step)
         pbar.close()
 
-    def save(self):
+    def save(self, step: int):
         """Save the SAEs to disk."""
 
-        if (
-            self.cfg.distribute_modules
-            or not dist.is_initialized()
-            or dist.get_rank() == 0
-        ):
-            print("Saving checkpoint")
+        for hook, sae in self.saes.items():
+            assert isinstance(sae, Sae)
 
-            for hook, sae in self.saes.items():
-                assert isinstance(sae, Sae)
+            hook_name = "_".join(hook)
 
-                hook_name = "_".join(hook)
+            path = self.cfg.run_name or "checkpoints"
+            full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
 
-                path = self.cfg.run_name or "checkpoints"
-                full_path = f"{self.cfg.root_path}/{path}/{hook_name}"
+            # Ensure the directory exists
+            os.makedirs(full_path, exist_ok=True)
 
-                # Ensure the directory exists
-                os.makedirs(full_path, exist_ok=True)
+            # Save the state dict instead of pickling the entire object
+            sae_state = {
+                "encoder.weight": sae.encoder.weight,
+                "encoder.bias": sae.encoder.bias,
+                "decoder.weight": sae.W_dec,
+                "decoder.bias": sae.b_dec,
+            }
 
-                # Save the state dict instead of pickling the entire object
-                sae_state = {
-                    "encoder": sae.encoder.state_dict(),
-                    "decoder": DTensor.to_local(sae.W_dec)
-                    if isinstance(sae.W_dec, DTensor)
-                    else sae.W_dec,
-                    "b_dec": DTensor.to_local(sae.b_dec)
-                    if isinstance(sae.b_dec, DTensor)
-                    else sae.b_dec,
-                }
-
-                torch.save(sae_state, f"{full_path}/sae_state.pt")
+            state_dict_saver.save(
+                sae_state, storage_writer=FileSystemWriter(f"{full_path}/sae-{step}")
+            )
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():

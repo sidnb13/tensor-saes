@@ -8,7 +8,7 @@ import einops
 import torch
 from huggingface_hub import snapshot_download
 from natsort import natsorted
-from safetensors.torch import load_model, save_model
+from safetensors.torch import load_file
 from torch import Tensor, nn
 from torch.distributed._tensor import DTensor, Replicate
 
@@ -138,7 +138,10 @@ class Sae(nn.Module):
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
+        step: int | None = None,
     ) -> "Sae":
+        # TODO: sidnb13 collect sharded weights into unified SAE on loading.
+
         path = Path(path)
 
         with open(path / "cfg.json", "r") as f:
@@ -147,16 +150,19 @@ class Sae(nn.Module):
             cfg = SaeConfig(**cfg_dict)
 
         sae = Sae(d_in, cfg, device=device, decoder=decoder)
-        load_model(
-            model=sae,
-            filename=str(path / "sae.safetensors"),
-            device=str(device),
+        sae_weights = torch.save(
+            str(path / ("sae.pt" if step is None else f"sae-{step}.pt")),
+            map_location=str(device),
             # TODO: Maybe be more fine-grained about this in the future?
-            strict=decoder,
         )
+        sae.encoder.weight = sae_weights["encoder.weight"]
+        sae.encoder.bias = sae_weights["encoder.bias"]
+        sae.W_dec = sae_weights["decoder.weight"]
+        sae.b_dec = sae_weights["decoder.bias"]
         return sae
 
     def save_to_disk(self, path: Path | str):
+        # TODO: sidnb13 this probably doesn't work with Trainer's saving
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 

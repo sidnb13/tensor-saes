@@ -34,7 +34,7 @@ class RunConfig(TrainConfig):
 
     split: str = "train"
     """Dataset split to use for training."""
-    
+
     ds_name: str | None = None
     """Dataset name to use when loading from huggingface."""
 
