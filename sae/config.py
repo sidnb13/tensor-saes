@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from simple_parsing import Serializable, list_field
+from torch import norm
 
 
 @dataclass
@@ -50,6 +51,9 @@ class TrainConfig(Serializable):
 
     auxk_alpha: float = 0.0
     """Weight of the auxiliary loss term."""
+
+    normalize_hiddens: bool = True 
+    """Normalize hiddens to have unit norm along embedding dimension."""
 
     dead_feature_threshold: int = 10_000_000
     """Number of tokens after which a feature is considered dead."""
