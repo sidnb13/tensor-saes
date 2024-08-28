@@ -65,5 +65,6 @@ CMD="-m sae \
     tp=true \
     ddp=false \
     optimizer=adam_zero"
+    
 
 eval $LAUNCHER $CMD

@@ -211,6 +211,10 @@ class SaeTrainer:
             grad_norms = {}
 
             for name, hiddens in hidden_dict.items():
+                # normalize hiddens to have unit norm
+                if self.cfg.normalize_hiddens:
+                    hiddens = hiddens / hiddens.norm(dim=-1, keepdim=True)
+
                 raw = self.saes[name]  # 'raw' never has a DDP wrapper
 
                 # On the first iteration, initialize the decoder bias
@@ -704,6 +708,10 @@ class SaeLayerRangeTrainer(SaeTrainer):
             grad_norms = {}
 
             for names, hiddens in hidden_dict.items():
+                # normalize hiddens to have unit norm
+                if self.cfg.normalize_hiddens:
+                    hiddens = hiddens / hiddens.norm(dim=-1, keepdim=True)
+
                 raw = self.saes[names]  # 'raw' never has a DDP wrapper
 
                 # On the first iteration, initialize the decoder bias
