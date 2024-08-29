@@ -66,7 +66,7 @@ class Sae(nn.Module):
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
         self.tp_mesh = None
 
-    def handle_dec_bias(self, x: torch.Tensor, op="add"):
+    def handle_dec_bias(self, x: torch.Tensor, op="add") -> torch.Tensor | DTensor:
         if isinstance(self.b_dec, DTensor):
             x = DTensor.from_local(x, self.tp_mesh, placements=[Replicate()])
 
@@ -94,7 +94,9 @@ class Sae(nn.Module):
                 layers = ["_".join(layer) for layer in layers]
             return {
                 layer: Sae.load_from_disk(
-                    repo_path / layer, device=device, decoder=decoder
+                    repo_path / layer,
+                    device=device,
+                    decoder=decoder,
                 )
                 for layer in natsorted(layers)
             }
@@ -155,7 +157,7 @@ class Sae(nn.Module):
                 path
                 / ("sae.safetensors" if step is None else f"sae-{step}.safetensors")
             ),
-            map_location=str(device),
+            device=str(device),
             # TODO: Maybe be more fine-grained about this in the future?
         )
         sae.encoder.weight = sae_weights["encoder.weight"]
