@@ -14,6 +14,7 @@ data_preprocessing_num_proc: 48
 # distributed
 ddp: false
 tp: false
+port: 29500
 
 optimizer: zero
 
@@ -44,4 +45,5 @@ root_path: checkpoints
 log_to_wandb: true
 stdout_log_frequency: 10
 run_name: null
+wandb_group: null
 wandb_log_frequency: 1

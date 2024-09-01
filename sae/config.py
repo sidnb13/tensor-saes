@@ -52,7 +52,7 @@ class TrainConfig(Serializable):
     auxk_alpha: float = 0.0
     """Weight of the auxiliary loss term."""
 
-    normalize_hiddens: bool = True 
+    normalize_hiddens: bool = True
     """Normalize hiddens to have unit norm along embedding dimension."""
 
     dead_feature_threshold: int = 10_000_000
@@ -89,6 +89,7 @@ class TrainConfig(Serializable):
     """Root path to save checkpoints to."""
 
     log_to_wandb: bool = True
+    wandb_group: str | None = None
     run_name: str | None = None
     wandb_log_frequency: int = 1
     stdout_log_frequency: int = 10

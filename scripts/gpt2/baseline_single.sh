@@ -22,7 +22,7 @@ export WANDB_PROJECT="sae-experiments"
 export WANDB_ENTITY="michaelsklar"
 export WANDB_RUN_GROUP="fvu-scale-microsweep"
 
-python -m sae \
+python -m sae.train \
     --multirun \
     model=$MODEL \
     dataset=$DATASET \

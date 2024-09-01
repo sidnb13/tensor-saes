@@ -23,7 +23,7 @@ export WANDB_PROJECT="sae-experiments"
 export WANDB_ENTITY="michaelsklar"
 
 # Cross-layer training
-torchrun --nnodes 1 --nproc_per_node 8 -m sae \
+torchrun --nnodes 1 --nproc_per_node 8 -m sae.train \
     --multirun \
     model=$MODEL \
     dataset=$DATASET \

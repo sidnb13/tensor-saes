@@ -138,6 +138,7 @@ class SaeTrainer:
                     name=self.cfg.run_name,
                     project="sae",
                     config=asdict(self.cfg),
+                    group=self.cfg.wandb_group,
                     save_code=True,
                 )
             except ImportError:
@@ -622,6 +623,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     name=self.cfg.run_name,
                     project="sae",
                     config=asdict(self.cfg),
+                    group=self.cfg.wandb_group,
                     save_code=True,
                 )
             except ImportError:
@@ -891,13 +893,20 @@ class SaeLayerRangeTrainer(SaeTrainer):
             if self.rank == 0:
                 sae.save_config(full_path)
 
-            # Save the state dict instead of pickling the entire object
-            sae_state = {
-                "encoder.weight": DTensor.full_tensor(sae.encoder.weight),
-                "encoder.bias": DTensor.full_tensor(sae.encoder.bias),
-                "decoder.weight": DTensor.full_tensor(sae.W_dec),
-                "decoder.bias": DTensor.full_tensor(sae.b_dec),
-            }
+            if self.cfg.tp:
+                # Save the state dict instead of pickling the entire object
+                sae_state = {
+                    "encoder.weight": DTensor.full_tensor(sae.encoder.weight),
+                    "encoder.bias": DTensor.full_tensor(sae.encoder.bias),
+                    "decoder.weight": DTensor.full_tensor(sae.W_dec),
+                    "decoder.bias": DTensor.full_tensor(sae.b_dec),
+                }
+            else:
+                sae_state = {
+                    **sae.encoder.state_dict(),
+                    "decoder.weight": sae.W_dec,
+                    "decoder.bias": sae.b_dec,
+                }
 
             if self.rank == 0:
                 os.makedirs(full_path, exist_ok=True)

@@ -1,4 +1,5 @@
 import os
+import socket
 from collections import defaultdict
 from functools import partial
 from typing import Any, Type, TypeVar, cast
@@ -23,6 +24,12 @@ from .logger import get_logger
 T = TypeVar("T")
 
 logger = get_logger(__name__)
+
+
+def get_open_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))  # bind to all interfaces and use an OS provided port
+        return s.getsockname()[1]  # return only the port number
 
 
 def log_parameter_norms(sae, names_str, info):

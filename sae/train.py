@@ -1,5 +1,4 @@
 import os
-from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
 from multiprocessing import cpu_count
@@ -7,6 +6,7 @@ from multiprocessing import cpu_count
 import hydra
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 from datasets import Dataset, load_dataset
 from omegaconf import DictConfig, OmegaConf
 from simple_parsing import field
@@ -17,6 +17,7 @@ from sae.config import SaeConfig
 from .data import MemmapDataset, chunk_and_tokenize
 from .logger import get_logger
 from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
+from .utils import get_open_port
 
 logger = get_logger(__name__)
 
@@ -61,9 +62,11 @@ class RunConfig(TrainConfig):
     # distributed
     ddp: bool = False
 
+    port: int = field(default_factory=get_open_port)
+
 
 def load_artifacts(
-    args: RunConfig, rank: int
+    args: RunConfig, rank: int | None = None
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
@@ -74,7 +77,7 @@ def load_artifacts(
 
     model = AutoModel.from_pretrained(
         args.model,
-        device_map={"": f"cuda:{rank}"},
+        device_map={"": f"cuda:{rank}"} if rank is not None else "auto",
         quantization_config=(
             BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
             if args.load_in_8bit
@@ -124,20 +127,23 @@ def load_artifacts(
     return model, dataset
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="config")
-def run(cfg: DictConfig):
-    local_rank = os.environ.get("LOCAL_RANK", 0)
+def worker_main(
+    rank: int,
+    world_size: int,
+    cfg: DictConfig,
+):
     ddp, tp = cfg.ddp, cfg.tp
-    rank = int(local_rank)
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-    if ddp:
-        torch.cuda.set_device(int(local_rank))
-        dist.init_process_group("nccl")
+    if ddp and world_size > 1:
+        torch.cuda.set_device(rank)
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = str(cfg.port)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+        dist.init_process_group("nccl", world_size=world_size, rank=rank)
 
         if rank == 0:
             logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
-    if tp and rank == 0:
+    if tp and rank == 0 and world_size > 1:
         logger.info(f"Using TP across {world_size} GPUs.")
 
     # Convert Hydra config to RunConfig
@@ -145,16 +151,11 @@ def run(cfg: DictConfig):
     sae_config = parsed_config.pop("sae")
     args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)
 
-    if rank == 0:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.run_name = f"{args.run_name}_{timestamp}"
-    else:
-        timestamp = None
-
     # Awkward hack to prevent other ranks from duplicating data preprocessing
-    if tp or not ddp or rank == 0:
+    if not dist.is_initialized() or tp or not ddp or rank == 0:
         model, dataset = load_artifacts(args, rank)
-    if ddp:
+
+    if ddp and dist.is_initialized():
         dist.barrier()
         if rank != 0:
             model, dataset = load_artifacts(args, rank)
@@ -166,15 +167,40 @@ def run(cfg: DictConfig):
         SaeTrainer if not args.enable_cross_layer_training else SaeLayerRangeTrainer
     )
 
-    # Prevent ranks other than 0 from logger.infoing
-    with nullcontext() if rank == 0 else redirect_stdout(None):
-        logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
-        logger.info(f"Storing model weights in {model.dtype}")
-        logger.info(f"Num tokens in dataset: {total_tokens:,}")
-        trainer = trainer_cls(args, dataset, model, rank, world_size)
-        logger.info(f"SAEs: {trainer.saes}")
-        trainer.fit()
+    logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
+    logger.info(f"Storing model weights in {model.dtype}")
+    logger.info(f"Num tokens in dataset: {total_tokens:,}")
+    trainer = trainer_cls(args, dataset, model, rank, world_size)
+    logger.info(f"SAEs: {trainer.saes}")
+    trainer.fit()
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+@hydra.main(version_base=None, config_path="../config", config_name="config")
+def main(cfg: DictConfig):
+    world_size = torch.cuda.device_count()
+
+    # Convert Hydra config to RunConfig
+    parsed_config = OmegaConf.to_container(cfg, resolve=True)
+    sae_config = parsed_config.pop("sae")
+    args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    args.run_name = f"{args.run_name}_{timestamp}"
+
+    if world_size > 1:
+        logger.info(f"Spawning {world_size} processes")
+        mp.spawn(
+            worker_main,
+            nprocs=world_size,
+            args=(world_size, cfg),
+        )
+    else:
+        worker_main(0, world_size, cfg)
 
 
 if __name__ == "__main__":
-    run()
+    mp.set_start_method("spawn")
+    main()

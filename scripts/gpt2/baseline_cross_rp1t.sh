@@ -38,7 +38,7 @@ elif [[ ! -z $CUDA_VISIBLE_DEVICES ]]; then
 fi
 
 # Cross-layer training
-CMD="-m sae \
+CMD="-m sae.train \
     --multirun \
     model=$MODEL \
     dataset=$DATASET \
