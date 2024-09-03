@@ -130,32 +130,25 @@ def load_artifacts(
 def worker_main(
     rank: int,
     world_size: int,
-    cfg: DictConfig,
+    args: RunConfig,
 ):
-    ddp, tp = cfg.ddp, cfg.tp
-
-    if ddp and world_size > 1:
+    if args.ddp and world_size > 1:
         torch.cuda.set_device(rank)
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = str(cfg.port)
+        os.environ["MASTER_PORT"] = str(args.port)
         os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
         dist.init_process_group("nccl", world_size=world_size, rank=rank)
 
         if rank == 0:
             logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
-    if tp and rank == 0 and world_size > 1:
+    if args.tp and rank == 0 and world_size > 1:
         logger.info(f"Using TP across {world_size} GPUs.")
 
-    # Convert Hydra config to RunConfig
-    parsed_config = OmegaConf.to_container(cfg, resolve=True)
-    sae_config = parsed_config.pop("sae")
-    args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)
-
     # Awkward hack to prevent other ranks from duplicating data preprocessing
-    if not dist.is_initialized() or tp or not ddp or rank == 0:
+    if not dist.is_initialized() or args.tp or not args.ddp or rank == 0:
         model, dataset = load_artifacts(args, rank)
 
-    if ddp and dist.is_initialized():
+    if args.ddp and dist.is_initialized():
         dist.barrier()
         if rank != 0:
             model, dataset = load_artifacts(args, rank)
@@ -195,10 +188,10 @@ def main(cfg: DictConfig):
         mp.spawn(
             worker_main,
             nprocs=world_size,
-            args=(world_size, cfg),
+            args=(world_size, args),
         )
     else:
-        worker_main(0, world_size, cfg)
+        worker_main(0, world_size, args)
 
 
 if __name__ == "__main__":
