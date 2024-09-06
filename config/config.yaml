@@ -1,9 +1,11 @@
 defaults:
   - _self_
 
+seed: 42
 model: gpt2
 dataset: togethercomputer/RedPajama-Data-1T-Sample
 split: train
+train_test_split: 0.8
 ds_name: null
 ctx_len: 64
 hf_token: null

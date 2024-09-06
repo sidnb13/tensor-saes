@@ -26,6 +26,12 @@ T = TypeVar("T")
 logger = get_logger(__name__)
 
 
+def set_seed(seed: int):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def get_open_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))  # bind to all interfaces and use an OS provided port

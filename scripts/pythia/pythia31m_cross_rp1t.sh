@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define shared variables
-MODEL="EleutherAI/pythia-14m"
+MODEL="EleutherAI/pythia-31m"
 DATASET="togethercomputer/RedPajama-Data-1T-Sample"
 SPLIT="train"
 CTX_LEN=64
@@ -10,15 +10,15 @@ GRAD_ACC_STEPS=1
 MICRO_ACC_STEPS=4
 LR_WARMUP_STEPS=20
 LR=1e-3
-AUXK_ALPHA=0.0
+AUXK_ALPHA=0.0,0.03125,0.5,1
 DEAD_FEATURE_THRESHOLD=100000
 LOG_TO_WANDB=True
 MAX_EXAMPLES=-1
 K=128
 SCALE_FVU=0.2
-RUN_NAME="pythia14m-all-layers-rp1t-sample"
-EXPANSION_FACTOR=2,4,8,16,32
-WANDB_GROUP="pythia14m-sweeps-expansion"
+RUN_NAME="pythia31m-all-layers-rp1t-sample"
+EXPANSION_FACTOR=32
+WANDB_GROUP="pythia31m-sweeps-auxk"
 SAVE_EVERY=50
 
 SEEDS=42
@@ -39,6 +39,7 @@ fi
 # Cross-layer training
 CMD="python -m sae.train \
     --multirun \
+    port=29501 \
     model=$MODEL \
     seed=$SEEDS \
     dataset=$DATASET \

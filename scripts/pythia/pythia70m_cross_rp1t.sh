@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define shared variables
-MODEL="EleutherAI/pythia-14m"
+MODEL="EleutherAI/pythia-70m"
 DATASET="togethercomputer/RedPajama-Data-1T-Sample"
 SPLIT="train"
 CTX_LEN=64
@@ -10,18 +10,18 @@ GRAD_ACC_STEPS=1
 MICRO_ACC_STEPS=4
 LR_WARMUP_STEPS=20
 LR=1e-3
-AUXK_ALPHA=0.0
+AUXK_ALPHA=0.03125
 DEAD_FEATURE_THRESHOLD=100000
 LOG_TO_WANDB=True
 MAX_EXAMPLES=-1
 K=128
 SCALE_FVU=0.2
-RUN_NAME="pythia14m-all-layers-rp1t-sample"
-EXPANSION_FACTOR=2,4,8,16,32
-WANDB_GROUP="pythia14m-sweeps-expansion"
+RUN_NAME="pythia70m-all-layers-rp1t-sample"
+EXPANSION_FACTOR=32
+WANDB_GROUP="pythia70m-sweeps-v1"
 SAVE_EVERY=50
 
-SEEDS=42
+SEEDS=42,43,44
 
 export WANDB_PROJECT="sae-experiments"
 export WANDB_ENTITY="michaelsklar"

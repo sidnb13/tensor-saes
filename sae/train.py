@@ -17,13 +17,16 @@ from sae.config import SaeConfig
 from .data import MemmapDataset, chunk_and_tokenize
 from .logger import get_logger
 from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
-from .utils import get_open_port
+from .utils import get_open_port, set_seed
 
 logger = get_logger(__name__)
 
 
 @dataclass
 class RunConfig(TrainConfig):
+    seed: int = field(default=42)
+    """Random seed to use for training."""
+
     model: str = field(
         default="gpt2",
         positional=True,
@@ -38,6 +41,9 @@ class RunConfig(TrainConfig):
 
     split: str = "train"
     """Dataset split to use for training."""
+
+    train_test_split: float = 0.8
+    """Fraction of the dataset to use for training."""
 
     ds_name: str | None = None
     """Dataset name to use when loading from huggingface."""
@@ -108,6 +114,13 @@ def load_artifacts(
                 raise e
 
         assert isinstance(dataset, Dataset)
+
+        # create train-test split
+        if args.train_test_split > 0:
+            dataset = dataset.train_test_split(
+                test_size=args.train_test_split, seed=args.seed
+            ).get(args.split)
+
         if "input_ids" not in dataset.column_names:
             tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
             dataset = chunk_and_tokenize(
@@ -143,6 +156,9 @@ def worker_main(
             logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
     if args.tp and rank == 0 and world_size > 1:
         logger.info(f"Using TP across {world_size} GPUs.")
+
+    # set seeds
+    set_seed(args.seed)
 
     # Awkward hack to prevent other ranks from duplicating data preprocessing
     if not dist.is_initialized() or args.tp or not args.ddp or rank == 0:
