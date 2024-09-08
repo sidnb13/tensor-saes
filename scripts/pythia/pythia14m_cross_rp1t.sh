@@ -17,8 +17,8 @@ MAX_EXAMPLES=-1
 K=128
 SCALE_FVU=0.2
 RUN_NAME="pythia14m-all-layers-rp1t-sample"
-EXPANSION_FACTOR=2,4,8,16,32
-WANDB_GROUP="pythia14m-sweeps-expansion"
+EXPANSION_FACTOR=4
+WANDB_GROUP="pythia14m-sweeps-auxk-expansion"
 SAVE_EVERY=50
 
 SEEDS=42
