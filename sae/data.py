@@ -18,9 +18,10 @@ def chunk_and_tokenize(
     tokenizer: PreTrainedTokenizerBase,
     *,
     format: str = "torch",
-    num_proc: int = cpu_count() // 2,
+    num_proc: int = 1,
     text_key: str = "text",
     max_seq_len: int = 2048,
+    batch_size: int = 2048,
     return_final_batch: bool = False,
     load_from_cache_file: bool = True,
 ) -> T:
@@ -92,10 +93,11 @@ def chunk_and_tokenize(
         # since we always throw away the last element of the batch we
         # want to keep the batch size as large as possible
         batched=True,
-        batch_size=2048,
+        batch_size=batch_size,
         num_proc=num_proc,
         remove_columns=get_columns_all_equal(data),
         load_from_cache_file=load_from_cache_file,
+        desc="Chunking and tokenizing",
     )
     return data.with_format(format, columns=["input_ids"])
 
