@@ -6,6 +6,7 @@ __pycache__/
 # Hydra
 outputs/
 multirun/
+assets/
 
 # C extensions
 *.so
