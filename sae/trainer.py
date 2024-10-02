@@ -7,7 +7,6 @@ from typing import Sized
 import torch
 import torch.distributed as dist
 from natsort import natsorted
-from regex import D
 from safetensors.torch import save_file
 from torch import Tensor, nn
 from torch.distributed._tensor import DTensor
