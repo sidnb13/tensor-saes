@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 
 from simple_parsing import Serializable, list_field
-from torch import norm
 
 
 @dataclass
@@ -29,6 +28,9 @@ class SaeConfig(Serializable):
     """Number of nonzero features."""
 
     signed: bool = False
+
+    post_act_bias: bool = False
+    """Whether to add a bias to the output of the activation function."""
 
 
 @dataclass

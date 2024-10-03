@@ -13,13 +13,14 @@ LR=1e-3
 AUXK_ALPHA=0.0
 DEAD_FEATURE_THRESHOLD=100000
 LOG_TO_WANDB=True
-MAX_EXAMPLES=-1
+MAX_EXAMPLES=1_000_000
 K=128
 SCALE_FVU=0.2
 RUN_NAME="pythia14m-all-layers-rp1t-sample"
 EXPANSION_FACTOR=4
-WANDB_GROUP="pythia14m-sweeps-auxk-expansion"
+WANDB_GROUP="pythia-14m-post-act-bias"
 SAVE_EVERY=50
+USE_POST_ACT_BIAS=True,False
 
 SEEDS=42
 
@@ -47,6 +48,7 @@ CMD="python -m sae.train \
     sae.scale_encoder_fvu=$SCALE_FVU \
     sae.k=$K \
     sae.expansion_factor=$EXPANSION_FACTOR \
+    sae.post_act_bias=$USE_POST_ACT_BIAS \
     'layers=[[0, 1, 2, 3, 4, 5]]' \
     split=$SPLIT \
     ctx_len=$CTX_LEN \

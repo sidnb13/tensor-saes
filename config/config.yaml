@@ -28,6 +28,7 @@ sae:
   num_latents: 0
   k: 32
   signed: false
+  post_act_bias: false
 
 batch_size: 8
 grad_acc_steps: 1

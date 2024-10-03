@@ -64,6 +64,14 @@ class Sae(nn.Module):
             self.set_decoder_norm_to_unit_norm()
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+        if self.cfg.post_act_bias:
+            self.post_act_bias = nn.Parameter(
+                torch.zeros(self.num_latents, dtype=dtype, device=device)
+            )
+        else:
+            self.post_act_bias = None
+
         self.tp_mesh = None
 
     def handle_dec_bias(self, x: torch.Tensor, op="add") -> torch.Tensor | DTensor:
@@ -222,6 +230,11 @@ class Sae(nn.Module):
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
         pre_acts = self.pre_acts(x)
         top_acts, top_indices = self.select_topk(pre_acts)
+
+        if self.post_act_bias is not None:
+            top_acts = top_acts + self.post_act_bias.expand(x.shape[0], -1).gather(
+                1, top_indices
+            )
 
         # Decode and compute residual
         sae_out = self.decode(top_acts, top_indices)

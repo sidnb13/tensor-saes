@@ -42,13 +42,21 @@ def log_parameter_norms(sae, names_str, info):
     with torch.no_grad():
         encoder_norm = torch.norm(sae.encoder.weight).item()
         decoder_norm = torch.norm(sae.W_dec).item()
-        bias_norm = sae.b_dec.norm().item()
+        dec_bias_norm = sae.b_dec.norm().item()
+        if sae.post_act_bias is not None:
+            post_act_bias_norm = sae.post_act_bias.norm().item()
+            info.update(
+                {
+                    f"post_act_bias_norm/{names_str}": post_act_bias_norm,
+                    f"post_act_bias_l0/{names_str}": sae.post_act_bias.norm(p=0).item(),
+                }
+            )
 
         info.update(
             {
                 f"encoder_norm/{names_str}": encoder_norm,
                 f"decoder_norm/{names_str}": decoder_norm,
-                f"bias_norm/{names_str}": bias_norm,
+                f"dec_bias_norm/{names_str}": dec_bias_norm,
             }
         )
 
