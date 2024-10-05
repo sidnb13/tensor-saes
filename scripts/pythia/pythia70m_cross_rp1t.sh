@@ -16,10 +16,11 @@ LOG_TO_WANDB=True
 MAX_EXAMPLES=-1
 K=128
 SCALE_FVU=0.2
-RUN_NAME="pythia70m-all-layers-rp1t-sample"
+RUN_NAME="pythia70m-all-layers-rp1t-post-act-bias"
 EXPANSION_FACTOR=8
-WANDB_GROUP="pythia70m-sweeps-auxk-expansion"
+WANDB_GROUP="pythia-70m-post-act-bias"
 SAVE_EVERY=50
+USE_POST_ACT_BIAS=True
 
 SEEDS=42
 
@@ -47,6 +48,7 @@ CMD="python -m sae.train \
     sae.scale_encoder_fvu=$SCALE_FVU \
     sae.k=$K \
     sae.expansion_factor=$EXPANSION_FACTOR \
+    sae.post_act_bias=$USE_POST_ACT_BIAS \
     'layers=[[0, 1, 2, 3, 4, 5]]' \
     split=$SPLIT \
     ctx_len=$CTX_LEN \
