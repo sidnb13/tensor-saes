@@ -1,0 +1,44 @@
+{
+  "layer_0": {
+    "num_features": 1691,
+    "active_features": 2368,
+    "mean_encoder_norm": 0.4100765287876129,
+    "mean_decoder_norm": 0.3847448229789734,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_1": {
+    "num_features": 90,
+    "active_features": 2368,
+    "mean_encoder_norm": 0.4100765287876129,
+    "mean_decoder_norm": 0.3847448229789734,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_2": {
+    "num_features": 155,
+    "active_features": 2368,
+    "mean_encoder_norm": 0.4100765287876129,
+    "mean_decoder_norm": 0.3847448229789734,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_3": {
+    "num_features": 35,
+    "active_features": 2368,
+    "mean_encoder_norm": 0.4100765287876129,
+    "mean_decoder_norm": 0.3847448229789734,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_4": {
+    "num_features": 366,
+    "active_features": 2368,
+    "mean_encoder_norm": 0.4100765287876129,
+    "mean_decoder_norm": 0.3847448229789734,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_5": {
+    "num_features": 31,
+    "active_features": 2368,
+    "mean_encoder_norm": 0.4100765287876129,
+    "mean_decoder_norm": 0.3847448229789734,
+    "exclude_first_k_tokens": 0
+  }
+}
