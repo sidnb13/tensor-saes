@@ -242,6 +242,9 @@ class SaeTrainer:
                     )
 
                     if raw.cfg.scale_encoder_fvu:
+                        logger.info(
+                            "Computing global mean and variance for FVU scaling"
+                        )
                         total_variance = torch.zeros(
                             hiddens.shape[-1],
                             device=self.model.device,

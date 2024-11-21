@@ -15,14 +15,14 @@ DEAD_FEATURE_THRESHOLD=100000
 LOG_TO_WANDB=True
 MAX_EXAMPLES=-1
 K=128
-SCALE_FVU=0.2
+SCALE_FVU=0.2,0.4,0.8,1.0,null
 RUN_NAME="pythia70m-all-layers-rp1t-fix-fvu-scaling"
 EXPANSION_FACTOR=8
 WANDB_GROUP="fix-fvu-scaling"
 SAVE_EVERY=50
 USE_POST_ACT_BIAS=False
 
-SEEDS=42
+SEEDS=43,44,45,46
 
 export WANDB_PROJECT="sae-experiments"
 export WANDB_ENTITY="michaelsklar"
