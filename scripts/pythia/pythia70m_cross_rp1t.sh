@@ -16,11 +16,11 @@ LOG_TO_WANDB=True
 MAX_EXAMPLES=-1
 K=128
 SCALE_FVU=0.2
-RUN_NAME="pythia70m-all-layers-rp1t-post-act-bias"
+RUN_NAME="pythia70m-all-layers-rp1t-fix-fvu-scaling"
 EXPANSION_FACTOR=8
-WANDB_GROUP="pythia-70m-post-act-bias"
+WANDB_GROUP="fix-fvu-scaling"
 SAVE_EVERY=50
-USE_POST_ACT_BIAS=True
+USE_POST_ACT_BIAS=False
 
 SEEDS=42
 

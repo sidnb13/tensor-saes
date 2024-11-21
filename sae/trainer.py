@@ -35,7 +35,8 @@ class SaeTrainer:
     def __init__(
         self,
         cfg: TrainConfig,
-        dataset: Dataset,
+        train_dataset: Dataset,
+        test_dataset: Dataset,
         model: PreTrainedModel,
         *args,
         **kwargs,
@@ -62,12 +63,13 @@ class SaeTrainer:
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
 
         self.cfg = cfg
-        self.dataset = dataset
+        self.train_dataset = train_dataset
+        self.test_dataset = test_dataset
         self.distribute_modules()
 
         N = len(cfg.hookpoints)
-        assert isinstance(dataset, Sized)
-        num_examples = len(dataset)
+        assert isinstance(train_dataset, Sized)
+        num_examples = len(train_dataset)
 
         device = model.device
         input_widths = resolve_widths(model, cfg.hookpoints)
@@ -153,7 +155,7 @@ class SaeTrainer:
 
         device = self.model.device
         dl = DataLoader(
-            self.dataset,
+            self.train_dataset,
             batch_size=self.cfg.batch_size,
             shuffle=True,
         )
@@ -239,6 +241,76 @@ class SaeTrainer:
                         else self.saes
                     )
 
+                    if raw.cfg.scale_encoder_fvu:
+                        total_variance = torch.zeros(
+                            hiddens.shape[-1],
+                            device=self.model.device,
+                            dtype=torch.float32,
+                        )
+                        output_variance = torch.zeros(
+                            hiddens.shape[-1],
+                            device=self.model.device,
+                            dtype=torch.float32,
+                        )
+                        test_loader = DataLoader(
+                            self.test_dataset, batch_size=self.cfg.batch_size
+                        )
+
+                        hidden_sum = torch.zeros_like(total_variance)
+                        total_tokens = 0
+
+                        for batch in test_loader:
+                            hidden_dict.clear()
+                            handles = [
+                                mod.register_forward_hook(hook)
+                                for mod in name_to_module.values()
+                            ]
+                            try:
+                                with torch.no_grad():
+                                    self.model(batch["input_ids"].to(device))
+                            finally:
+                                for handle in handles:
+                                    handle.remove()
+
+                            batch_hiddens = hidden_dict[name]
+                            all_hiddens = self.maybe_all_cat(batch_hiddens)
+                            hidden_sum += all_hiddens.sum(0)
+                            total_tokens += all_hiddens.shape[0]
+
+                        global_mean = hidden_sum / total_tokens
+
+                        for batch in test_loader:
+                            hidden_dict.clear()
+                            handles = [
+                                mod.register_forward_hook(hook)
+                                for mod in name_to_module.values()
+                            ]
+                            try:
+                                with torch.no_grad():
+                                    self.model(batch["input_ids"].to(device))
+                            finally:
+                                for handle in handles:
+                                    handle.remove()
+
+                            batch_hiddens = hidden_dict[name]
+                            all_hiddens = self.maybe_all_cat(batch_hiddens)
+
+                            total_variance += ((all_hiddens - global_mean).pow(2)).sum(
+                                0
+                            )
+
+                            for chunk in all_hiddens.chunk(self.cfg.micro_acc_steps):
+                                with torch.no_grad():
+                                    reconstructed = raw(chunk).sae_out
+                                    output_variance += (
+                                        (reconstructed - chunk).pow(2)
+                                    ).sum(0)
+
+                        total_variance /= total_tokens
+                        output_variance /= total_tokens
+
+                        raw.scale_encoder_fvu(total_variance, output_variance)
+
                 # Make sure the W_dec is still unit-norm
                 if raw.cfg.normalize_decoder:
                     raw.set_decoder_norm_to_unit_norm()
@@ -246,9 +318,9 @@ class SaeTrainer:
                 if raw.cfg.scale_encoder_k:
                     raw.scale_encoder_k()
 
-                if raw.cfg.scale_encoder_fvu:
-                    all_hiddens = self.maybe_all_cat(hiddens)
-                    raw.scale_encoder_fvu(all_hiddens, self.cfg.micro_acc_steps)
+                # if raw.cfg.scale_encoder_fvu:
+                #     all_hiddens = self.maybe_all_cat(hiddens)
+                #     raw.scale_encoder_fvu_batch(all_hiddens, self.cfg.micro_acc_steps)
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
                 denom = acc_steps * self.cfg.wandb_log_frequency
@@ -742,7 +814,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                     if raw.cfg.scale_encoder_fvu:
                         all_hiddens = self.maybe_all_cat(hiddens)
-                        raw.scale_encoder_fvu(all_hiddens, self.cfg.micro_acc_steps)
+                        raw.scale_encoder_fvu_batch(
+                            all_hiddens, self.cfg.micro_acc_steps
+                        )
 
                 # Make sure the W_dec is still unit-norm
                 if raw.cfg.normalize_decoder:
