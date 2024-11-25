@@ -1,44 +1,44 @@
 {
   "layer_0": {
-    "num_features": 2246,
-    "active_features": 3150,
-    "mean_encoder_norm": 0.42364418506622314,
-    "mean_decoder_norm": 0.38723328709602356,
+    "num_features": 2428,
+    "active_features": 3165,
+    "mean_encoder_norm": 0.3442719280719757,
+    "mean_decoder_norm": 0.39260753989219666,
     "exclude_first_k_tokens": 0
   },
   "layer_1": {
-    "num_features": 188,
-    "active_features": 3150,
-    "mean_encoder_norm": 0.42364418506622314,
-    "mean_decoder_norm": 0.38723328709602356,
+    "num_features": 163,
+    "active_features": 3165,
+    "mean_encoder_norm": 0.3442719280719757,
+    "mean_decoder_norm": 0.39260753989219666,
     "exclude_first_k_tokens": 0
   },
   "layer_2": {
-    "num_features": 177,
-    "active_features": 3150,
-    "mean_encoder_norm": 0.42364418506622314,
-    "mean_decoder_norm": 0.38723328709602356,
+    "num_features": 183,
+    "active_features": 3165,
+    "mean_encoder_norm": 0.3442719280719757,
+    "mean_decoder_norm": 0.39260753989219666,
     "exclude_first_k_tokens": 0
   },
   "layer_3": {
-    "num_features": 57,
-    "active_features": 3150,
-    "mean_encoder_norm": 0.42364418506622314,
-    "mean_decoder_norm": 0.38723328709602356,
+    "num_features": 38,
+    "active_features": 3165,
+    "mean_encoder_norm": 0.3442719280719757,
+    "mean_decoder_norm": 0.39260753989219666,
     "exclude_first_k_tokens": 0
   },
   "layer_4": {
-    "num_features": 442,
-    "active_features": 3150,
-    "mean_encoder_norm": 0.42364418506622314,
-    "mean_decoder_norm": 0.38723328709602356,
+    "num_features": 338,
+    "active_features": 3165,
+    "mean_encoder_norm": 0.3442719280719757,
+    "mean_decoder_norm": 0.39260753989219666,
     "exclude_first_k_tokens": 0
   },
   "layer_5": {
-    "num_features": 40,
-    "active_features": 3150,
-    "mean_encoder_norm": 0.42364418506622314,
-    "mean_decoder_norm": 0.38723328709602356,
+    "num_features": 15,
+    "active_features": 3165,
+    "mean_encoder_norm": 0.3442719280719757,
+    "mean_decoder_norm": 0.39260753989219666,
     "exclude_first_k_tokens": 0
   }
 }
