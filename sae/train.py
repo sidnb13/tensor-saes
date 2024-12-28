@@ -42,6 +42,9 @@ class RunConfig(TrainConfig):
     split: str = "train"
     """Dataset split to use for training."""
 
+    train_split: str = "train"
+    """Dataset split to use for training."""
+
     train_test_split: float = 0.8
     """Fraction of the dataset to use for training."""
 
@@ -57,8 +60,11 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
-    max_examples: int = -1
+    max_train_examples: int = -1
     """Maximum number of examples to use for training."""
+
+    max_test_examples: int = -1
+    """Maximum number of examples to use for testing."""
 
     data_preprocessing_num_proc: int = field(
         default_factory=lambda: cpu_count() // 2,
@@ -95,7 +101,7 @@ def load_artifacts(
 
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):
-        dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_examples)
+        dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_train_examples)
     else:
         # For Huggingface datasets
         try:
@@ -117,9 +123,10 @@ def load_artifacts(
 
         # create train-test split
         if args.train_test_split > 0:
-            dataset = dataset.train_test_split(
+            dataset_ = dataset.train_test_split(
                 test_size=args.train_test_split, seed=args.seed
-            ).get(args.split)
+            )
+            dataset, test_dataset = dataset_.get(args.train_split), dataset_.get("test")
 
         if "input_ids" not in dataset.column_names:
             tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
@@ -129,15 +136,26 @@ def load_artifacts(
                 max_seq_len=args.ctx_len,
                 num_proc=args.data_preprocessing_num_proc or os.cpu_count(),
             )
+            test_dataset = chunk_and_tokenize(
+                test_dataset,
+                tokenizer,
+                max_seq_len=args.ctx_len,
+                num_proc=args.data_preprocessing_num_proc or os.cpu_count(),
+            )
         else:
             logger.info("Dataset already tokenized; skipping tokenization.")
 
-        dataset = dataset.with_format("torch")
+        dataset, test_dataset = (
+            dataset.with_format("torch"),
+            test_dataset.with_format("torch"),
+        )
 
-        if (limit := args.max_examples) and args.max_examples > 0:
+        if (limit := args.max_train_examples) and args.max_train_examples > 0:
             dataset = dataset.select(range(limit))
+        if (limit := args.max_test_examples) and args.max_test_examples > 0:
+            test_dataset = test_dataset.select(range(limit))
 
-    return model, dataset
+    return model, dataset, test_dataset
 
 
 def worker_main(
@@ -162,12 +180,12 @@ def worker_main(
 
     # Awkward hack to prevent other ranks from duplicating data preprocessing
     if not dist.is_initialized() or args.tp or not args.ddp or rank == 0:
-        model, dataset = load_artifacts(args, rank)
+        model, dataset, _ = load_artifacts(args, rank)
 
     if args.ddp and dist.is_initialized():
         dist.barrier()
         if rank != 0:
-            model, dataset = load_artifacts(args, rank)
+            model, dataset, _ = load_artifacts(args, rank)
         dataset = dataset.shard(dist.get_world_size(), rank)
 
     total_tokens = len(dataset) * args.ctx_len
@@ -178,7 +196,8 @@ def worker_main(
 
     logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
     logger.info(f"Storing model weights in {model.dtype}")
-    logger.info(f"Num tokens in dataset: {total_tokens:,}")
+    logger.info(f"Num tokens in train dataset: {total_tokens:,}")
+
     trainer = trainer_cls(args, dataset, model, rank, world_size)
     logger.info(f"SAEs: {trainer.saes}")
     trainer.fit()

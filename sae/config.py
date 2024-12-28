@@ -18,7 +18,10 @@ class SaeConfig(Serializable):
     scale_encoder_k: bool = False
     """Scale the encoder weights with factor of 1/sqrt(k)."""
 
-    scale_encoder_fvu: float = None
+    scale_encoder_fvu_batch: float = None
+    """Scale the encoder weights so no more than FVU specified is explained."""
+
+    scale_encoder_fvu_global: float = None
     """Scale the encoder weights so no more than FVU specified is explained."""
 
     num_latents: int = 0

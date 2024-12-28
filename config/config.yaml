@@ -1,16 +1,23 @@
 defaults:
   - _self_
+  - override hydra/launcher: ray_jobs
+
+hydra:
+  launcher:
+    poll_jobs: false
 
 seed: 42
-model: gpt2
+model: EleutherAI/pythia-70m
 dataset: togethercomputer/RedPajama-Data-1T-Sample
 split: train
+train_split: train
 train_test_split: 0.8
 ds_name: null
 ctx_len: 64
 hf_token: null
 load_in_8bit: false
-max_examples: -1
+max_train_examples: -1
+max_test_examples: -1
 data_preprocessing_num_proc: 48
 
 # distributed
@@ -18,15 +25,16 @@ ddp: false
 tp: false
 port: 29500
 
-optimizer: zero
+optimizer: adam
 
 sae:
-  expansion_factor: 32
+  expansion_factor: 8
   normalize_decoder: true
   scale_encoder_k: false
-  scale_encoder_fvu: null
+  scale_encoder_fvu_batch: null
+  scale_encoder_fvu_global: null
   num_latents: 0
-  k: 32
+  k: 128
   signed: false
   post_act_bias: false
 
@@ -38,7 +46,7 @@ lr_warmup_steps: 1000
 normalize_hiddens: true
 auxk_alpha: 0.0
 dead_feature_threshold: 10000000
-enable_cross_layer_training: false
+enable_cross_layer_training: true
 hookpoints: []
 layers: []
 layer_stride: 1

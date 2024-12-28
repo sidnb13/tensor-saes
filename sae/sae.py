@@ -291,7 +291,7 @@ class Sae(nn.Module):
     def scale_encoder_fvu(
         self, mean_total_variance: Tensor, mean_output_variance: Tensor
     ):
-        scale = self.cfg.scale_encoder_fvu * torch.sqrt(
+        scale = self.cfg.scale_encoder_fvu_batch * torch.sqrt(
             torch.mean(mean_total_variance) / torch.mean(mean_output_variance)
         )
         self.encoder.weight.data *= scale
@@ -309,7 +309,7 @@ class Sae(nn.Module):
             sae_out = self(chunk).sae_out
             output_variance += (sae_out - sae_out.mean(0)).pow(2).sum(0)
         # scale encoder weights
-        scale = self.cfg.scale_encoder_fvu * torch.sqrt(
+        scale = self.cfg.scale_encoder_fvu_batch * torch.sqrt(
             torch.mean(total_variance) / torch.mean(output_variance)
         )
         self.encoder.weight.data *= scale

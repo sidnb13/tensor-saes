@@ -241,7 +241,7 @@ class SaeTrainer:
                         else self.saes
                     )
 
-                    if raw.cfg.scale_encoder_fvu:
+                    if raw.cfg.scale_encoder_fvu_global:
                         logger.info(
                             "Computing global mean and variance for FVU scaling"
                         )
@@ -321,9 +321,9 @@ class SaeTrainer:
                 if raw.cfg.scale_encoder_k:
                     raw.scale_encoder_k()
 
-                # if raw.cfg.scale_encoder_fvu:
-                #     all_hiddens = self.maybe_all_cat(hiddens)
-                #     raw.scale_encoder_fvu_batch(all_hiddens, self.cfg.micro_acc_steps)
+                if raw.cfg.scale_encoder_fvu_batch:
+                    all_hiddens = self.maybe_all_cat(hiddens)
+                    raw.scale_encoder_fvu_batch(all_hiddens, self.cfg.micro_acc_steps)
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
                 denom = acc_steps * self.cfg.wandb_log_frequency
@@ -815,7 +815,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     if raw.cfg.scale_encoder_k:
                         raw.scale_encoder_k()
 
-                    if raw.cfg.scale_encoder_fvu:
+                    if raw.cfg.scale_encoder_fvu_batch:
                         all_hiddens = self.maybe_all_cat(hiddens)
                         raw.scale_encoder_fvu_batch(
                             all_hiddens, self.cfg.micro_acc_steps
