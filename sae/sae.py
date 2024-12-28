@@ -12,7 +12,8 @@ from safetensors.torch import load_file
 from torch import Tensor, nn
 from torch.distributed._tensor import DTensor, Replicate
 
-from .config import SaeConfig
+from sae.config import SaeConfig
+
 from .utils import decoder_impl
 
 

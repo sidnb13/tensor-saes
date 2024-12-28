@@ -13,11 +13,10 @@ from simple_parsing import field
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from sae.config import SaeConfig
-
-from .data import MemmapDataset, chunk_and_tokenize
-from .logger import get_logger
-from .trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
-from .utils import get_open_port, set_seed
+from sae.data import MemmapDataset, chunk_and_tokenize
+from sae.logger import get_logger
+from sae.trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
+from sae.utils import get_open_port, set_seed
 
 logger = get_logger(__name__)
 
@@ -206,7 +205,7 @@ def worker_main(
         dist.destroy_process_group()
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="config")
+@hydra.main(version_base=None, config_path="./config", config_name="config")
 def main(cfg: DictConfig):
     world_size = torch.cuda.device_count()
 
