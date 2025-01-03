@@ -77,7 +77,7 @@ class RunConfig(TrainConfig):
 
 
 def load_artifacts(
-    args: RunConfig, rank: int | None = None
+    args: RunConfig, rank: int | None = None,
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
@@ -123,7 +123,7 @@ def load_artifacts(
         # create train-test split
         if args.train_test_split > 0:
             dataset_ = dataset.train_test_split(
-                test_size=args.train_test_split, seed=args.seed
+                test_size=args.train_test_split, seed=args.seed,
             )
             dataset, test_dataset = dataset_.get(args.train_split), dataset_.get("test")
 

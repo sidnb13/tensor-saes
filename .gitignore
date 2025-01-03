@@ -167,3 +167,4 @@ cython_debug/
 checkpoints/
 wandb/
 *.pkl
+.DS_Store
