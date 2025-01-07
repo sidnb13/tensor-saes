@@ -5,6 +5,7 @@ defaults:
 hydra:
   launcher:
     poll_jobs: false
+    entrypoint_num_gpus: 1
 
 seed: 42
 model: EleutherAI/pythia-70m
@@ -25,7 +26,7 @@ ddp: false
 tp: false
 port: 29500
 
-optimizer: adam
+optimizer: adamw
 
 sae:
   expansion_factor: 8
@@ -38,11 +39,11 @@ sae:
   signed: false
   post_act_bias: false
 
-batch_size: 8
+batch_size: 512
 grad_acc_steps: 1
 micro_acc_steps: 1
-lr: null
-lr_warmup_steps: 1000
+lr: 0.001
+lr_warmup_steps: 2000
 normalize_hiddens: true
 auxk_alpha: 0.0
 dead_feature_threshold: 10000000

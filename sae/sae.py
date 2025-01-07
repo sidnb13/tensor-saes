@@ -299,6 +299,19 @@ class Sae(nn.Module):
         self.encoder.bias.data *= scale
 
     @torch.no_grad()
+    def compute_in_out_var(self, all_hiddens: Tensor, chunk_size):
+        total_variance = (all_hiddens - all_hiddens.mean(0)).pow(2).sum(0)
+        # compute output variance
+        output_variance = torch.zeros(
+            *all_hiddens.shape[1:], device=all_hiddens.device, dtype=all_hiddens.dtype
+        )
+        for chunk in all_hiddens.chunk(chunk_size):
+            sae_out = self(chunk).sae_out
+            output_variance += (sae_out - sae_out.mean(0)).pow(2).sum(0)
+
+        return torch.mean(total_variance), torch.mean(output_variance)
+
+    @torch.no_grad()
     def scale_encoder_fvu_batch(self, all_hiddens: Tensor, chunk_size):
         # (batch, seq, hidden * num_layers)
         total_variance = (all_hiddens - all_hiddens.mean(0)).pow(2).sum(0)
@@ -310,11 +323,14 @@ class Sae(nn.Module):
             sae_out = self(chunk).sae_out
             output_variance += (sae_out - sae_out.mean(0)).pow(2).sum(0)
         # scale encoder weights
+        mean_tot_var, mean_out_var = torch.mean(total_variance), torch.mean(output_variance)
         scale = self.cfg.scale_encoder_fvu_batch * torch.sqrt(
-            torch.mean(total_variance) / torch.mean(output_variance)
+            mean_tot_var / mean_out_var
         )
         self.encoder.weight.data *= scale
         self.encoder.bias.data *= scale
+
+        return mean_tot_var, mean_out_var
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):

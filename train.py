@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -65,7 +67,7 @@ class RunConfig(TrainConfig):
     max_test_examples: int = -1
     """Maximum number of examples to use for testing."""
 
-    data_preprocessing_num_proc: int = field(
+    data_preprocessing_num_proc: int = field(  # noqa: RUF009
         default_factory=lambda: cpu_count() // 2,
     )
     """Number of processes to use for preprocessing data"""
@@ -133,13 +135,13 @@ def load_artifacts(
                 dataset,
                 tokenizer,
                 max_seq_len=args.ctx_len,
-                num_proc=args.data_preprocessing_num_proc or os.cpu_count(),
+                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count()),
             )
             test_dataset = chunk_and_tokenize(
                 test_dataset,
                 tokenizer,
                 max_seq_len=args.ctx_len,
-                num_proc=args.data_preprocessing_num_proc or os.cpu_count(),
+                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count()),
             )
         else:
             logger.info("Dataset already tokenized; skipping tokenization.")
