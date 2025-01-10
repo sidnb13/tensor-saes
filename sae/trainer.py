@@ -256,7 +256,8 @@ class SaeTrainer:
                             dtype=torch.float32,
                         )
                         test_loader = DataLoader(
-                            self.test_dataset, batch_size=self.cfg.batch_size,
+                            self.test_dataset,
+                            batch_size=self.cfg.batch_size,
                         )
 
                         hidden_sum = torch.zeros_like(total_variance)
@@ -314,18 +315,27 @@ class SaeTrainer:
 
                         raw.scale_encoder_fvu(total_variance, output_variance)
 
+                    all_hiddens = self.maybe_all_cat(hiddens)
+                    if raw.cfg.scale_encoder_fvu_batch:
+                        in_var, out_var = raw.scale_encoder_fvu_batch(
+                            all_hiddens, self.cfg.micro_acc_steps
+                        )
+                    else:
+                        in_var, out_var = raw.compute_in_out_var(
+                            all_hiddens, self.cfg.micro_acc_steps
+                        )
+                else:
+                    all_hiddens = self.maybe_all_cat(hiddens)
+                    in_var, out_var = raw.compute_in_out_var(
+                        all_hiddens, self.cfg.micro_acc_steps
+                    )
+
                 # Make sure the W_dec is still unit-norm
                 if raw.cfg.normalize_decoder:
                     raw.set_decoder_norm_to_unit_norm()
 
                 if raw.cfg.scale_encoder_k:
                     raw.scale_encoder_k()
-
-                all_hiddens = self.maybe_all_cat(hiddens)
-                if raw.cfg.scale_encoder_fvu_batch:
-                    in_var, out_var = raw.scale_encoder_fvu_batch(all_hiddens, self.cfg.micro_acc_steps)
-                else:
-                    in_var, out_var = raw.compute_in_out_var(all_hiddens, self.cfg.micro_acc_steps)
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
                 denom = acc_steps * self.cfg.wandb_log_frequency
@@ -364,7 +374,8 @@ class SaeTrainer:
 
                 # Clip gradient norm independently for each SAE
                 grad_norms[name] = torch.nn.utils.clip_grad_norm_(
-                    raw.parameters(), 1.0,
+                    raw.parameters(),
+                    1.0,
                 ).item()
 
             # Check if we need to actually do a training step
@@ -423,7 +434,8 @@ class SaeTrainer:
                     log_parameter_norms(self.saes[names], names_str, info)
 
                 if (step + 1) % min(
-                    self.cfg.stdout_log_frequency, self.cfg.wandb_log_frequency,
+                    self.cfg.stdout_log_frequency,
+                    self.cfg.wandb_log_frequency,
                 ) == 0 and rank_zero:
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
@@ -685,7 +697,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
             self.optimizer = ZeroRedundancyOptimizer(pgs, AdamW)
 
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size,
+            self.optimizer,
+            cfg.lr_warmup_steps,
+            num_examples // cfg.batch_size,
         )
 
     def fit(self):
@@ -833,7 +847,8 @@ class SaeLayerRangeTrainer(SaeTrainer):
                             dtype=torch.float32,
                         )
                         test_loader = DataLoader(
-                            self.test_dataset, batch_size=self.cfg.batch_size,
+                            self.test_dataset,
+                            batch_size=self.cfg.batch_size,
                         )
 
                         hidden_sum = torch.zeros_like(total_variance)
@@ -891,14 +906,23 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                         raw.scale_encoder_fvu(total_variance, output_variance)
 
+                    all_hiddens = self.maybe_all_cat(hiddens)
+                    if raw.cfg.scale_encoder_fvu_batch:
+                        in_var, out_var = raw.scale_encoder_fvu_batch(
+                            all_hiddens, self.cfg.micro_acc_steps
+                        )
+                    else:
+                        in_var, out_var = raw.compute_in_out_var(
+                            all_hiddens, self.cfg.micro_acc_steps
+                        )
+
                     if raw.cfg.scale_encoder_k:
                         raw.scale_encoder_k()
-
-                all_hiddens = self.maybe_all_cat(hiddens)
-                if raw.cfg.scale_encoder_fvu_batch:
-                    in_var, out_var = raw.scale_encoder_fvu_batch(all_hiddens, self.cfg.micro_acc_steps)
                 else:
-                    in_var, out_var = raw.compute_in_out_var(all_hiddens, self.cfg.micro_acc_steps)
+                    all_hiddens = self.maybe_all_cat(hiddens)
+                    in_var, out_var = raw.compute_in_out_var(
+                        all_hiddens, self.cfg.micro_acc_steps
+                    )
 
                 # Make sure the W_dec is still unit-norm
                 if raw.cfg.normalize_decoder:
@@ -942,12 +966,14 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     # Update the did_fire mask
                     did_fire[names][out.latent_indices.flatten()] = True
                     self.maybe_all_reduce(
-                        did_fire[names], "max",
+                        did_fire[names],
+                        "max",
                     )  # max is boolean "any"
 
                 # Clip gradient norm independently for each SAE
                 grad_norms[names] = torch.nn.utils.clip_grad_norm_(
-                    raw.parameters(), 1.0,
+                    raw.parameters(),
+                    1.0,
                 ).item()
 
             # Check if we need to actually do a training step
@@ -996,8 +1022,8 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     )
 
                     if out_var is not None and in_var is not None:
-                         info[f"in_var/{names_str}"] = in_var.cpu().item()
-                         info[f"out_var/{names_str}"] = out_var.cpu().item()
+                        info[f"in_var/{names_str}"] = in_var.cpu().item()
+                        info[f"out_var/{names_str}"] = out_var.cpu().item()
 
                     if self.cfg.auxk_alpha > 0:
                         info[f"auxk/{names}"] = avg_auxk_loss[names]
@@ -1006,7 +1032,8 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     log_parameter_norms(self.saes[names], names_str, info)
 
                 if (step + 1) % min(
-                    self.cfg.stdout_log_frequency, self.cfg.wandb_log_frequency,
+                    self.cfg.stdout_log_frequency,
+                    self.cfg.wandb_log_frequency,
                 ) == 0 and rank_zero:
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
