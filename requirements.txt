@@ -34,6 +34,5 @@ simple-parsing
 tiktoken
 torch
 tqdm
-transformers
+transformers==4.42.1
 wandb
-

@@ -1,0 +1,44 @@
+{
+  "layer_0": {
+    "num_features": 2813,
+    "active_features": 3987,
+    "mean_encoder_norm": 0.6701494455337524,
+    "mean_decoder_norm": 0.3856559097766876,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_1": {
+    "num_features": 272,
+    "active_features": 3987,
+    "mean_encoder_norm": 0.6701494455337524,
+    "mean_decoder_norm": 0.3856559097766876,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_2": {
+    "num_features": 154,
+    "active_features": 3987,
+    "mean_encoder_norm": 0.6701494455337524,
+    "mean_decoder_norm": 0.3856559097766876,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_3": {
+    "num_features": 169,
+    "active_features": 3987,
+    "mean_encoder_norm": 0.6701494455337524,
+    "mean_decoder_norm": 0.3856559097766876,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_4": {
+    "num_features": 237,
+    "active_features": 3987,
+    "mean_encoder_norm": 0.6701494455337524,
+    "mean_decoder_norm": 0.3856559097766876,
+    "exclude_first_k_tokens": 0
+  },
+  "layer_5": {
+    "num_features": 342,
+    "active_features": 3987,
+    "mean_encoder_norm": 0.6701494455337524,
+    "mean_decoder_norm": 0.3856559097766876,
+    "exclude_first_k_tokens": 0
+  }
+}
