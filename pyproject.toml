@@ -1,24 +1,55 @@
-[build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "sae"
 description = "Sparse autoencoders"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["interpretability", "explainable-ai"]
-license = {text = "MIT License"}
+license = "MIT"
 version = "0.1.0"
 
-dynamic = ["dependencies"]
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+dependencies = [
+    "blobfile",
+    "datasets",
+    "einops",
+    "huggingface-hub",
+    "hydra-core",
+    "hydra-ray-jobs-launcher",
+    "hydra-submitit-launcher",
+    "hydra_colorlog",
+    "ipykernel",
+    "jupyter",
+    "line_profiler",
+    "line_profiler[ipython]",
+    "lxml",
+    "matplotlib",
+    "natsort",
+    "numpy",
+    "omegaconf",
+    "openai",
+    "pandas",
+    "pycryptodomex",
+    "python-dotenv",
+    "pyvene",
+    "pyyaml",
+    "scikit-learn",
+    "seaborn",
+    "simple-parsing",
+    "tiktoken",
+    "tqdm",
+    "transformers==4.42.1",
+    "wandb"
+]
 
-[project.scripts]
-sae = "sae.__main__:run"
-
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.6.2",
+    "ruff>=0.7.4",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+    "ai_commit @ git+https://github.com/sidnb13/toolbox.git#subdirectory=src/ai_commit",
+    "hydra-ray-jobs-launcher @ git+https://github.com/sidnb13/hydra#egg=hydra-ray-jobs-launcher&subdirectory=plugins/hydra_ray_jobs_launcher",
+    "hydra-list-sweeper"
+]
 
 [tool.setuptools.packages.find]
 include = ["sae*"]
-

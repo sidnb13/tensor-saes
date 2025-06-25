@@ -1,11 +1,26 @@
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v3.2.0
+    hooks:
+      - id: end-of-file-fixer
+        exclude: ".*\\.ipynb$"
+      - id: check-yaml
+        exclude: ".*\\.ipynb$"
+      - id: check-added-large-files
+        args: [--maxkb=250000]
+        exclude: ".*\\.ipynb$"
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9  # Use the latest version
+    rev: v0.7.4
     hooks:
       - id: ruff
-        args: 
-          - --fix
-          - --exit-non-zero-on-fix
-        exclude: ^notebooks/.*\.ipynb$
-      - id: ruff-format
-        exclude: ^notebooks/.*\.ipynb$
+        args: ["--fix"]
+        exclude: ".*\\.ipynb$"
+  - repo: https://github.com/sidnb13/toolbox
+    rev: ai-commit-v0.1.0.dev1
+    hooks:
+      - id: ai-commit
+        name: ai-commit
+        entry: ai-commit
+        language: python
+        stages: [commit-msg]
+        exclude: ".*\\.ipynb$"
