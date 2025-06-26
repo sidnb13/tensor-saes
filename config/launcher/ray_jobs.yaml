@@ -1,0 +1,16 @@
+# @package _global_
+# Ray launcher configuration
+# This merges at root level when specified
+
+defaults:
+  - _self_
+  - override /hydra/launcher: ray_jobs
+
+hydra:
+  launcher:
+    _target_: hydra_plugins.hydra_ray_jobs_launcher.ray_jobs_launcher.RayJobsLauncher
+    poll_jobs: false
+    entrypoint_num_gpus: 1
+    enable_gpu_blocking: true
+    entrypoint_resources:
+      saelens-main: 1

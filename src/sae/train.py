@@ -4,21 +4,23 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from multiprocessing import cpu_count
+from pathlib import Path
 
 import hydra
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import Dataset, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from dotenv import load_dotenv
 from omegaconf import DictConfig, OmegaConf
 from simple_parsing import field
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
-from sae.config import SaeConfig
-from sae.data import MemmapDataset, chunk_and_tokenize
-from sae.logger import get_logger
-from sae.trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
-from sae.utils import get_open_port, set_seed
+from src.sae.config import SaeConfig
+from src.sae.data import MemmapDataset, chunk_and_tokenize
+from src.sae.logger import get_logger
+from src.sae.trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
+from src.sae.utils import get_open_port, set_seed
 
 logger = get_logger(__name__)
 
@@ -78,8 +80,25 @@ class RunConfig(TrainConfig):
     port: int = field(default_factory=get_open_port)
 
 
+def _resolve_cache_dir():
+    """
+    Returns the HuggingFace cache directory, using HF_HOME if set,
+    otherwise defaults to ~/.cache/huggingface in the user's home directory.
+    Ensures that '~' is expanded to the actual home directory.
+    """
+    cache_dir = os.getenv("HF_HOME")
+    if cache_dir is None:
+        # Always expanduser to avoid literal '~' in the path
+        cache_dir = os.path.expanduser("~/.cache/huggingface")
+    else:
+        cache_dir = os.path.expanduser(cache_dir)
+
+    return os.path.abspath(cache_dir)
+
+
 def load_artifacts(
-    args: RunConfig, rank: int | None = None,
+    args: RunConfig,
+    rank: int | None = None,
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
@@ -105,27 +124,29 @@ def load_artifacts(
         dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_train_examples)
     else:
         # For Huggingface datasets
-        try:
+        if os.path.exists(args.dataset):
+            dataset = load_from_disk(args.dataset, keep_in_memory=False)
+            if isinstance(dataset, DatasetDict):
+                dataset = dataset.get(args.split)
+            logger.info(f"Loaded local dataset from {args.dataset}")
+        else:
             dataset = load_dataset(
                 args.dataset,
                 name=args.ds_name,
                 split=args.split,
                 # TODO: Maybe set this to False by default? But RPJ requires it.
                 trust_remote_code=True,
+                cache_dir=_resolve_cache_dir(),
             )
-        except ValueError as e:
-            # Automatically use load_from_disk if appropriate
-            if "load_from_disk" in str(e):
-                dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
-            else:
-                raise e
+            logger.info(f"Loaded hub dataset from {args.dataset}")
 
         assert isinstance(dataset, Dataset)
 
         # create train-test split
         if args.train_test_split > 0:
             dataset_ = dataset.train_test_split(
-                test_size=args.train_test_split, seed=args.seed,
+                test_size=args.train_test_split,
+                seed=args.seed,
             )
             dataset, test_dataset = dataset_.get(args.train_split), dataset_.get("test")
 
@@ -207,7 +228,11 @@ def worker_main(
         dist.destroy_process_group()
 
 
-@hydra.main(version_base=None, config_path="./config", config_name="config")
+@hydra.main(
+    version_base=None,
+    config_name="train",
+    config_path=str(Path(__file__).parent.parent.parent / "config"),
+)
 def main(cfg: DictConfig):
     world_size = torch.cuda.device_count()
 
@@ -231,5 +256,6 @@ def main(cfg: DictConfig):
 
 
 if __name__ == "__main__":
+    load_dotenv(override=True)
     mp.set_start_method("spawn")
     main()

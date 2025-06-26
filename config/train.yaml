@@ -1,11 +1,10 @@
 defaults:
   - _self_
-  - override hydra/launcher: ray_jobs
-
-hydra:
-  launcher:
-    poll_jobs: false
-    entrypoint_num_gpus: 1
+  - experiment: null
+  - launcher: null
+  - logging: colorlog
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
 
 seed: 42
 model: EleutherAI/pythia-70m
@@ -54,8 +53,9 @@ layer_stride: 1
 distribute_modules: false
 save_every: 1000
 root_path: checkpoints
-log_to_wandb: true
 stdout_log_frequency: 10
+
+log_to_wandb: true
 run_name: null
 wandb_group: null
 wandb_log_frequency: 1

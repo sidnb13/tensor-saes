@@ -1,0 +1,20 @@
+# @package _global_
+
+model: EleutherAI/pythia-14m
+dataset: "/workspace/tensor-saes/assets/data/debug_tiny_stories"
+split: train
+train_split: train
+train_test_split: 0.8
+
+sae:
+  expansion_factor: 2
+  normalize_decoder: true
+  scale_encoder_k: false
+  scale_encoder_fvu_batch: null
+  scale_encoder_fvu_global: null
+  num_latents: 0
+  k: 128
+  signed: false
+  post_act_bias: false
+
+log_to_wandb: false

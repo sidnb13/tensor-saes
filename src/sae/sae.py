@@ -10,11 +10,11 @@ from huggingface_hub import snapshot_download
 from natsort import natsorted
 from safetensors.torch import load_file
 from torch import Tensor, nn
-from torch.distributed._tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.placement_types import Replicate
 
-from sae.config import SaeConfig
-
-from .utils import decoder_impl
+from src.sae.config import SaeConfig
+from src.sae.utils import decoder_impl
 
 
 class EncoderOutput(NamedTuple):
@@ -323,7 +323,10 @@ class Sae(nn.Module):
             sae_out = self(chunk).sae_out
             output_variance += (sae_out - sae_out.mean(0)).pow(2).sum(0)
         # scale encoder weights
-        mean_tot_var, mean_out_var = torch.mean(total_variance), torch.mean(output_variance)
+        mean_tot_var, mean_out_var = (
+            torch.mean(total_variance),
+            torch.mean(output_variance),
+        )
         scale = self.cfg.scale_encoder_fvu_batch * torch.sqrt(
             mean_tot_var / mean_out_var
         )

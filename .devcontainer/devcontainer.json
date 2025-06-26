@@ -1,9 +1,0 @@
-{
-    "name": "tensor-saes",
-    "build": {
-        "context": "..",
-        "dockerfile": "../Dockerfile"
-    },
-    "workspaceFolder": "/workspace/tensor-saes",
-    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/tensor-saes,type=bind",
-}
