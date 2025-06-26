@@ -122,7 +122,7 @@ def plot_sequencewise_activation_rate_heatmap(
 
 
 def plot_activation_rate_statistics(
-    stats,
+    stats: GlobalFeatureStatistics,
     K=4,
     plot_cfg: PlotConfig = PlotConfig(
         plot_dir="plots", plot_name="activation_rate_statistics_random_samples"
@@ -310,7 +310,8 @@ def plot_feature_cosine_similarity(
     # Select a top feature
     top_feature_index = torch.kthvalue(stats.feature_activation_rate, k=k, dim=0)[1]
     dec_feat_vectors = feature_decoder_weights[top_feature_index].reshape(
-        model_config.num_hidden_layers, model_config.hidden_size  # type: ignore
+        model_config.num_hidden_layers,
+        model_config.hidden_size,  # type: ignore
     )
 
     # Compute cosine similarity between layers
