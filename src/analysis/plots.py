@@ -2,20 +2,40 @@ import os
 import random
 from dataclasses import dataclass
 
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
+import pandas as pd
 import torch
-from matplotlib.colors import LogNorm
+from plotnine import (
+    aes,
+    element_text,
+    geom_histogram,
+    geom_text,
+    geom_tile,
+    ggplot,
+    theme,
+)
+from plotnine.ggplot import save_as_pdf_pages
+from plotnine.labels import labs
+from plotnine.scales import scale_fill_gradient, scale_y_log10
+from plotnine.themes import theme_minimal
 from transformers import AutoConfig
+import matplotlib.pyplot as plt
 
 from src.analysis.stats import GlobalFeatureStatistics
+from src.analysis.utils import (
+    SaeWeights,
+    calculate_layer_norms,
+    filter_features_by_layer,
+    filter_inactive_features,
+)
 
 
 @dataclass
 class PlotConfig:
     plot_dir: str
     plot_name: str
+    activation_threshold: float = 0.0
+    norm_threshold: float = 0.0
 
 
 def plot_activation_rate_heatmap(
@@ -27,41 +47,39 @@ def plot_activation_rate_heatmap(
     ),
 ):
     """
-    Plots the activation rate heatmap for the given tokenwise feature activation rate.
+    Plots the activation rate heatmap for the given tokenwise feature activation rate using plotnine (ggplot).
     """
-    # Convert to numpy and transpose to have features on y-axis and token positions on x-axis
     data = tokenwise_feature_activation_rate.cpu().numpy().T
-
-    # If there are too many features, sample a subset
     if data.shape[0] > max_features:
         indices = np.random.choice(data.shape[0], max_features, replace=False)
         data = data[indices]
-
-    # Set very small values to min_rate to avoid log(0)
     data = np.maximum(data, min_rate)
+    # Prepare DataFrame for plotnine
 
-    # Create the plot
-    plt.figure(figsize=(20, 10))
-
-    # Use LogNorm for the color scaling
-    sns.heatmap(
-        data,
-        cmap="viridis",
-        norm=LogNorm(vmin=min_rate, vmax=1),
-        cbar_kws={"label": "Activation Rate (log scale)"},
+    df = pd.DataFrame(data)
+    df = df.reset_index().melt(
+        id_vars="index", var_name="Token Position", value_name="Activation Rate"
     )
-
-    plt.title("Feature Activation Rates by Token Position (Log Scale)")
-    plt.xlabel("Token Position")
-    plt.ylabel("Feature Index")
-
-    # Save the plot
-    plt.savefig(
-        os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"),
-        dpi=300,
-        bbox_inches="tight",
+    df = df.rename(columns={"index": "Feature Index"})
+    p = (
+        ggplot(df, aes("Token Position", "Feature Index", fill="Activation Rate"))
+        + geom_tile()
+        + scale_fill_gradient(low="#440154", high="#FDE725", trans="log")
+        + labs(
+            title="Feature Activation Rates by Token Position (Log Scale)",
+            x="Token Position",
+            y="Feature Index",
+            fill="Activation Rate (log scale)",
+        )
+        + theme_minimal()
+        + theme(
+            figure_size=(20, 10),
+            axis_text_x=element_text(rotation=90, hjust=1),
+            title=element_text(size=16),
+        )
     )
-    plt.show()
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+    p.save(os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"), dpi=300)
 
 
 def plot_sequencewise_activation_rate_heatmap(
@@ -74,51 +92,44 @@ def plot_sequencewise_activation_rate_heatmap(
     ),
 ):
     """
-    Plots the sequencewise activation rate heatmap for the given sequencewise feature activation rate.
+    Plots the sequencewise activation rate heatmap for the given sequencewise feature activation rate..
     """
-    # Convert to numpy and transpose to have features on y-axis and sequences on x-axis
     data = sequencewise_feature_activation_rate.cpu().numpy().T
-
-    # If there are too many features, sample a subset
     if data.shape[0] > max_features:
         indices = np.random.choice(data.shape[0], max_features, replace=False)
         data = data[indices]
-
-    # If there are too many sequences, sample a subset
     if data.shape[1] > max_sequences:
         indices = np.random.choice(data.shape[1], max_sequences, replace=False)
         data = data[:, indices]
-
-    # Sort sequences by their mean activation rate
     sequence_mean_rates = np.mean(data, axis=0)
     sorted_indices = np.argsort(sequence_mean_rates)[::-1]
     data = data[:, sorted_indices]
-
-    # Set very small values to min_rate to avoid log(0)
     data = np.maximum(data, min_rate)
 
-    # Create the plot
-    plt.figure(figsize=(20, 10))
-
-    # Use LogNorm for the color scaling
-    sns.heatmap(
-        data,
-        cmap="viridis",
-        norm=LogNorm(vmin=min_rate, vmax=1),
-        cbar_kws={"label": "Activation Rate (log scale)"},
+    df = pd.DataFrame(data)
+    df = df.reset_index().melt(
+        id_vars="index", var_name="Sequence Index", value_name="Activation Rate"
     )
-
-    plt.title("Feature Activation Rates by Sequence (Log Scale)")
-    plt.xlabel("Sequence Index (sorted by mean activation rate)")
-    plt.ylabel("Feature Index")
-
-    # Save the plot
-    plt.savefig(
-        os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"),
-        dpi=300,
-        bbox_inches="tight",
+    df = df.rename(columns={"index": "Feature Index"})
+    p = (
+        ggplot(df, aes("Sequence Index", "Feature Index", fill="Activation Rate"))
+        + geom_tile()
+        + scale_fill_gradient(low="#440154", high="#FDE725", trans="log")
+        + labs(
+            title="Feature Activation Rates by Sequence (Log Scale)",
+            x="Sequence Index (sorted by mean activation rate)",
+            y="Feature Index",
+            fill="Activation Rate (log scale)",
+        )
+        + theme_minimal()
+        + theme(
+            figure_size=(20, 10),
+            axis_text_x=element_text(rotation=90, hjust=1),
+            title=element_text(size=16),
+        )
     )
-    plt.show()
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+    p.save(os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"), dpi=300)
 
 
 def plot_activation_rate_statistics(
@@ -129,88 +140,53 @@ def plot_activation_rate_statistics(
     ),
 ):
     """
-    Plots the activation rate statistics for the given stats.
+    Plots the activation rate statistics for the given stats using plotnine (ggplot).
     """
 
-    # Create a figure with K rows and 2 columns
-    fig, axes = plt.subplots(K, 2, figsize=(20, 5 * K))
-    fig.suptitle("Feature Activation Rate Distributions", fontsize=16, y=0.95)
-
-    # Define colors for each type of plot
-    sequence_color = "cornflowerblue"
-    token_color = "lightcoral"
-
-    # Select K random sequence indices and token positions
     n_sequences = stats.sequencewise_feature_activation_rate.shape[0]
     n_tokens = stats.tokenwise_feature_activation_rate.shape[0]
-
     random_sequences = torch.randperm(n_sequences)[:K]
     random_positions = torch.randperm(n_tokens)[:K]
-
+    plots = []
     for i in range(K):
-        # Sequence-wise activation rate histogram (left column)
-        seq_idx = random_sequences[i].item()
+        seq_idx = int(random_sequences[i].item())
         sequence_rates = (
             stats.sequencewise_feature_activation_rate[seq_idx].cpu().numpy()
         )
-
-        axes[i, 0].hist(
-            sequence_rates, bins=50, edgecolor="black", color=sequence_color, alpha=0.7
+        df_seq = pd.DataFrame({"Activation Rate": sequence_rates})
+        p_seq = (
+            ggplot(df_seq, aes(x="Activation Rate"))
+            + geom_histogram(bins=50, fill="cornflowerblue", color="black", alpha=0.7)
+            + scale_y_log10()
+            + labs(
+                title=f"Example {seq_idx} Feature Activation Distribution",
+                x="Activation Rate",
+                y="Frequency",
+            )
+            + theme_minimal()
+            + theme(title=element_text(size=12))
         )
-        axes[i, 0].set_title(f"Example {seq_idx} Feature Activation Distribution")
-        axes[i, 0].set_xlabel("Activation Rate")
-        axes[i, 0].set_ylabel("Frequency")
-        axes[i, 0].set_yscale("log")
-        axes[i, 0].grid(True, which="both", ls="--", alpha=0.5)
-
-        # Add statistics as text
-        stats_text = f"Active: {(sequence_rates > 0).sum()}"
-        axes[i, 0].text(
-            0.95,
-            0.95,
-            stats_text,
-            transform=axes[i, 0].transAxes,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-        )
-
-        # Token-position-wise activation rate histogram (right column)
-        pos_idx = random_positions[i].item()
+        pos_idx = int(random_positions[i].item())
         token_rates = stats.tokenwise_feature_activation_rate[pos_idx].cpu().numpy()
-
-        axes[i, 1].hist(
-            token_rates, bins=50, edgecolor="black", color=token_color, alpha=0.7
+        df_token = pd.DataFrame({"Activation Rate": token_rates})
+        p_token = (
+            ggplot(df_token, aes(x="Activation Rate"))
+            + geom_histogram(bins=50, fill="lightcoral", color="black", alpha=0.7)
+            + scale_y_log10()
+            + labs(
+                title=f"Token Position {pos_idx} Feature Activation Distribution",
+                x="Activation Rate",
+                y="Frequency",
+            )
+            + theme_minimal()
+            + theme(title=element_text(size=12))
         )
-        axes[i, 1].set_title(
-            f"Token Position {pos_idx} Feature Activation Distribution"
-        )
-        axes[i, 1].set_xlabel("Activation Rate")
-        axes[i, 1].set_ylabel("Frequency")
-        axes[i, 1].set_yscale("log")
-        axes[i, 1].grid(True, which="both", ls="--", alpha=0.5)
-
-        # Add statistics as text
-        stats_text = f"Active: {(token_rates > 0).sum()}"
-        axes[i, 1].text(
-            0.95,
-            0.95,
-            stats_text,
-            transform=axes[i, 1].transAxes,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-        )
-
-    plt.tight_layout()
-    # Adjust the layout to make room for the title
-    plt.subplots_adjust(top=0.93)  # This creates space between the title and the plots
-    plt.savefig(
-        os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"),
-        dpi=300,
-        bbox_inches="tight",
+        plots.append(p_seq)
+        plots.append(p_token)
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+    save_as_pdf_pages(
+        plots, os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.pdf")
     )
-    plt.show()
 
 
 def plot_feature_activation_rate_histogram(
@@ -220,23 +196,24 @@ def plot_feature_activation_rate_histogram(
     ),
 ):
     """
-    Plots the feature activation rate histogram for the given stats.
+    Plots the feature activation rate histogram for the given stats using plotnine (ggplot).
     """
-    plt.figure(figsize=(12, 6))
-    plt.hist(stats.feature_activation_rate.cpu().numpy(), bins=50, edgecolor="black")
-    plt.title("Histogram of Feature Activation Rates")
-    plt.xlabel("Activation Rate")
-    plt.ylabel("Frequency")
-    plt.yscale("log")  # Use log scale for y-axis to better visualize the distribution
-    plt.grid(True, which="both", ls="--", alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"),
-        dpi=300,
-        bbox_inches="tight",
+
+    df = pd.DataFrame({"Activation Rate": stats.feature_activation_rate.cpu().numpy()})
+    p = (
+        ggplot(df, aes(x="Activation Rate"))
+        + geom_histogram(bins=50, fill="#3182bd", color="black")
+        + scale_y_log10()
+        + labs(
+            title="Histogram of Feature Activation Rates",
+            x="Activation Rate",
+            y="Frequency",
+        )
+        + theme_minimal()
+        + theme(title=element_text(size=14))
     )
-    plt.show()
-    plt.close()
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+    p.save(os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"), dpi=300)
 
 
 def plot_token_position_activation_histograms(
@@ -248,51 +225,27 @@ def plot_token_position_activation_histograms(
         plot_dir="plots", plot_name="token_position_activation_histograms_N9"
     ),
 ):
-    # Randomly sample N token positions
     token_positions = random.sample(range(seq_len - exclude_first_token_position), N)
-    token_positions.sort()  # Sort for better visualization
-
-    # Calculate number of rows and columns for the grid
-    n_rows = int(np.ceil(np.sqrt(N)))
-    n_cols = int(np.ceil(N / n_rows))
-
-    # Create the main figure
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-    fig.suptitle(
-        "Feature Activation Rate Distributions for Random Token Positions", fontsize=16
-    )
-
-    # Flatten axes array for easy iteration
-    axes = axes.flatten() if N > 1 else [axes]
-
-    for i, position in enumerate(token_positions):
-        ax = axes[i]
-
-        # Get activation rates for this token position
+    token_positions.sort()
+    plots = []
+    for position in token_positions:
         activation_rates = tokenwise_feature_activation_rate[position].cpu().numpy()
-
-        # Create histogram
-        ax.hist(activation_rates, bins=30, edgecolor="black")
-
-        ax.set_title(f"Token Position: {position}")
-        ax.set_xlabel("Activation Rate")
-        ax.set_ylabel("Frequency")
-        ax.set_yscale("log")  # Use log scale for y-axis
-
-    # Remove any unused subplots
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
-
-    plt.tight_layout()
-
-    # Save the plot to PLOT_DIR
-    plt.savefig(
-        os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"),
-        dpi=300,
-        bbox_inches="tight",
+        df = pd.DataFrame({"Activation Rate": activation_rates})
+        p = (
+            ggplot(df, aes(x="Activation Rate"))
+            + geom_histogram(bins=30, fill="#31a354", color="black")
+            + scale_y_log10()
+            + labs(
+                title=f"Token Position: {position}", x="Activation Rate", y="Frequency"
+            )
+            + theme_minimal()
+            + theme(title=element_text(size=12))
+        )
+        plots.append(p)
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+    save_as_pdf_pages(
+        plots, os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.pdf")
     )
-
-    plt.show()
 
 
 def plot_feature_cosine_similarity(
@@ -305,39 +258,422 @@ def plot_feature_cosine_similarity(
     ),
 ):
     """
-    Plots the feature cosine similarity heatmap for the given stats.
+    Plots the feature cosine similarity heatmap for the given stats using plotnine (ggplot).
     """
-    # Select a top feature
+
     top_feature_index = torch.kthvalue(stats.feature_activation_rate, k=k, dim=0)[1]
     dec_feat_vectors = feature_decoder_weights[top_feature_index].reshape(
-        model_config.num_hidden_layers,
+        model_config.num_hidden_layers,  # type: ignore
         model_config.hidden_size,  # type: ignore
     )
-
-    # Compute cosine similarity between layers
     cos_sim = torch.nn.functional.cosine_similarity(
-        dec_feat_vectors.unsqueeze(1),  # Shape: [num_layers, 1, hidden_size]
-        dec_feat_vectors.unsqueeze(0),  # Shape: [1, num_layers, hidden_size]
-        dim=2,  # Compute similarity along the hidden_size dimension
+        dec_feat_vectors.unsqueeze(1),
+        dec_feat_vectors.unsqueeze(0),
+        dim=2,
     )
-    # \text{cos_sim} shape: [num_layers, num_layers]
-
-    # Create a heatmap
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cos_sim.cpu().numpy(), cmap="coolwarm", vmin=-1, vmax=1, center=0)
-    plt.title(f"Cosine Similarity of Decoder Vectors (Top {k} Feature)")
-    plt.xlabel("Vector Index")
-    plt.ylabel("Vector Index")
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"),
-        dpi=300,
-        bbox_inches="tight",
+    cos_sim_np = cos_sim.cpu().numpy()
+    n = cos_sim_np.shape[0]
+    df = pd.DataFrame(
+        {
+            "Layer1": np.repeat(np.arange(n), n),
+            "Layer2": np.tile(np.arange(n), n),
+            "Cosine Similarity": cos_sim_np.flatten(),
+        }
     )
-    plt.close()
+    p = (
+        ggplot(df, aes("Layer1", "Layer2", fill="Cosine Similarity"))
+        + geom_tile()
+        + scale_fill_gradient(low="#440154", high="#FDE725", limits=(-1, 1))
+        + labs(
+            title=f"Cosine Similarity of Decoder Vectors (Top {k} Feature)",
+            x="Vector Index",
+            y="Vector Index",
+            fill="Cosine Similarity",
+        )
+        + theme_minimal()
+        + theme(
+            figure_size=(10, 8),
+            axis_text_x=element_text(rotation=90, hjust=1),
+            title=element_text(size=14),
+        )
+    )
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+    p.save(os.path.join(plot_cfg.plot_dir, f"{plot_cfg.plot_name}.png"), dpi=300)
 
-    # Print some statistics about the cosine similarities
-    print(f"Min cosine similarity: {cos_sim.min().item():.4f}")
-    print(f"Max cosine similarity: {cos_sim.max().item():.4f}")
-    print(f"Mean cosine similarity: {cos_sim.mean().item():.4f}")
-    print(f"Median cosine similarity: {cos_sim.median().item():.4f}")
+
+def plot_layerwise_filtering(
+    sae_weights: SaeWeights,
+    num_layers: int,
+    feature_activation_rate: torch.Tensor,
+    plot_cfg: PlotConfig,
+):
+    """
+    For each layer, filter features where that layer has the largest norm (layer-wise filtering),
+    then stack the filtered features for all layers horizontally into a single 2D grid plot.
+    Do this for both encoder and decoder norms, using plotnine (ggplot).
+    Each plot will have y-axis as layer, x-axis as concatenated filtered features (grouped by layer).
+    """
+    activation_threshold = plot_cfg.activation_threshold
+    save_folder = plot_cfg.plot_dir
+    # Calculate norms: shape (num_layers, num_features)
+    encoder_norms = calculate_layer_norms(
+        sae_weights.feature_encoder_weights, num_layers
+    )
+    decoder_norms = calculate_layer_norms(
+        sae_weights.feature_decoder_weights, num_layers
+    )
+
+    # Filter features by activation rate threshold
+    mask = feature_activation_rate > activation_threshold
+    filtered_activation_rate = feature_activation_rate[mask]
+    encoder_norms = encoder_norms[:, mask]
+    decoder_norms = decoder_norms[:, mask]
+
+    # Sort features by activation rate (descending)
+    sorted_indices = torch.argsort(filtered_activation_rate, descending=True)
+    encoder_norms = encoder_norms[:, sorted_indices]
+    decoder_norms = decoder_norms[:, sorted_indices]
+    filtered_activation_rate = filtered_activation_rate[sorted_indices]
+
+    # For each layer, filter features where that layer has the largest norm
+    encoder_blocks = []
+    decoder_blocks = []
+    feature_labels = []
+    feature_layer_labels = []
+    running_idx = 0
+
+    for i in range(num_layers):
+        enc_block, dec_block, layer_mask = filter_features_by_layer(
+            encoder_norms, decoder_norms, i
+        )
+        # Only keep features with nonzero count
+        if enc_block.shape[1] == 0:
+            continue
+        # Optionally, sort by activation rate within this block
+        block_activation = filtered_activation_rate[layer_mask]
+        block_sort_idx = torch.argsort(block_activation, descending=True)
+        enc_block = enc_block[:, block_sort_idx]
+        dec_block = dec_block[:, block_sort_idx]
+        block_activation = block_activation[block_sort_idx]
+
+        encoder_blocks.append(enc_block)
+        decoder_blocks.append(dec_block)
+        # For x-axis labeling
+        feature_labels.extend(
+            list(range(running_idx, running_idx + enc_block.shape[1]))
+        )
+        feature_layer_labels.extend([i] * enc_block.shape[1])
+        running_idx += enc_block.shape[1]
+
+    # Stack horizontally: shape (num_layers, total_filtered_features)
+    if len(encoder_blocks) == 0 or len(decoder_blocks) == 0:
+        print("No features passed the filtering. No plot will be generated.")
+        return None, None
+
+    encoder_grid = torch.cat(encoder_blocks, dim=1).cpu().numpy()
+    decoder_grid = torch.cat(decoder_blocks, dim=1).cpu().numpy()
+    total_features = encoder_grid.shape[1]
+    n_layers = encoder_grid.shape[0]
+
+    # Prepare DataFrame for encoder
+    encoder_df = pd.DataFrame(
+        {
+            "Layer": np.repeat(np.arange(n_layers), total_features),
+            "Feature": np.tile(np.arange(total_features), n_layers),
+            "Norm": encoder_grid.flatten(),
+            "FeatureLayer": np.tile(feature_layer_labels, n_layers),
+        }
+    )
+
+    # Prepare DataFrame for decoder
+    decoder_df = pd.DataFrame(
+        {
+            "Layer": np.repeat(np.arange(n_layers), total_features),
+            "Feature": np.tile(np.arange(total_features), n_layers),
+            "Norm": decoder_grid.flatten(),
+            "FeatureLayer": np.tile(feature_layer_labels, n_layers),
+        }
+    )
+
+    # Plot encoder norms heatmap
+    encoder_plot = (
+        ggplot(encoder_df, aes("Feature", "Layer", fill="Norm"))
+        + geom_tile()
+        + scale_fill_gradient(low="#440154", high="#FDE725")
+        + labs(
+            title="Encoder Norms (Layer-wise Filtered, Features Stacked by Layer)",
+            x="Feature (concatenated by layer)",
+            y="Layer",
+            fill="Norm",
+        )
+        + theme_minimal()
+        + theme(
+            figure_size=(max(16, total_features // 50), 4),
+            axis_text_x=element_text(rotation=90, hjust=1, size=6),
+            axis_text_y=element_text(size=10),
+            title=element_text(size=14),
+        )
+    )
+
+    # Plot decoder norms heatmap
+    decoder_plot = (
+        ggplot(decoder_df, aes("Feature", "Layer", fill="Norm"))
+        + geom_tile()
+        + scale_fill_gradient(low="#440154", high="#FDE725")
+        + labs(
+            title="Decoder Norms (Layer-wise Filtered, Features Stacked by Layer)",
+            x="Feature (concatenated by layer)",
+            y="Layer",
+            fill="Norm",
+        )
+        + theme_minimal()
+        + theme(
+            figure_size=(max(16, total_features // 50), 4),
+            axis_text_x=element_text(rotation=90, hjust=1, size=6),
+            axis_text_y=element_text(size=10),
+            title=element_text(size=14),
+        )
+    )
+
+    # Save plots
+    if save_folder:
+        os.makedirs(save_folder, exist_ok=True)
+        encoder_plot.save(
+            os.path.join(save_folder, "encoder_norms_layerwise_filtered_heatmap.png"),
+            dpi=300,
+        )
+        decoder_plot.save(
+            os.path.join(save_folder, "decoder_norms_layerwise_filtered_heatmap.png"),
+            dpi=300,
+        )
+
+
+def process_layer(
+    encoder_weights,
+    decoder_weights,
+    encoder_bias,
+    layer_index,
+    num_layers,
+):
+    """Process a single layer and return filtered weights and statistics."""
+    encoder_norms = calculate_layer_norms(encoder_weights, num_layers)
+    decoder_norms = calculate_layer_norms(decoder_weights, num_layers)
+
+    filtered_encoder_norms, filtered_decoder_norms, layer_mask = (
+        filter_features_by_layer(encoder_norms, decoder_norms, layer_index)
+    )
+
+    if filtered_encoder_norms.numel() == 0 or filtered_decoder_norms.numel() == 0:
+        print(f"No features left after filtering layer {layer_index}")
+        return {}
+
+    num_features = filtered_encoder_norms.shape[1]
+
+    return {
+        "filtered_encoder": encoder_weights[layer_mask, :],
+        "filtered_encoder_bias": encoder_bias[layer_mask],
+        "filtered_decoder": decoder_weights[layer_mask, :],
+        "num_features": num_features,
+        "active_features": encoder_norms.shape[1],
+        "mean_encoder_norm": encoder_norms.mean().item(),
+        "mean_decoder_norm": decoder_norms.mean().item(),
+    }
+
+
+def plot_layerwise_filtering_workflow(
+    stats: GlobalFeatureStatistics,
+    sae_weights: SaeWeights,
+    num_layers: int,
+    plot_cfg: PlotConfig,
+):
+    """
+    Wrapper utility for layerwise filtering and plotting workflow.
+
+    Args:
+        stats (GlobalFeatureStatistics): Feature statistics object.
+        sae_weights (SaeWeights): SAE weights dataclass.
+        num_layers (int): Number of layers.
+        plot_cfg (PlotConfig): Plot configuration object.
+
+    Returns:
+        filtered_sae_weights (SaeWeights): Filtered SAE weights.
+
+    Usage example:
+        plot_cfg = PlotConfig(
+            plot_dir="../assets/plot_dir/layer_filtering_results",
+            plot_name="layerwise_filtering",
+            activation_threshold=0.0,
+            norm_threshold=0.0,
+        )
+        filtered_sae_weights = plot_layerwise_filtering_workflow(
+            stats,
+            sae_weights,
+            num_layers=6,
+            plot_cfg=plot_cfg,
+        )
+    """
+    # Step 1: Filter inactive features
+    filtered_sae_weights = filter_inactive_features(
+        stats.feature_activation_rate,
+        sae_weights,
+        min_activation_rate=plot_cfg.activation_threshold,
+    )
+    # Step 2: Plot layerwise filtering
+    plot_layerwise_filtering(
+        filtered_sae_weights,
+        num_layers,
+        stats.feature_activation_rate,
+        plot_cfg,
+    )
+    return filtered_sae_weights
+
+
+def plot_trigger_layer_heatmaps(
+    results,
+    num_layers,
+    rank_k_feature,
+    plot_cfg: PlotConfig = PlotConfig(
+        plot_dir="plots", plot_name="layer_heatmaps_top_k"
+    ),
+):
+    os.makedirs(plot_cfg.plot_dir, exist_ok=True)
+
+    metric_keys = [
+        "causal_cosines",
+        "causality",
+        "self_cosine_similarity",
+    ]
+    std_keys = [
+        "causal_cosines_std",
+        "causality_std",
+        "self_cosine_similarity_std",
+    ]
+    titles = [
+        "Causal Cosine",
+        "Causal Strength",
+        "Self Cosine Similarity",
+    ]
+
+    for layer in range(num_layers):
+        if not results[layer]:
+            print(f"No results for layer {layer}")
+            continue
+
+        # Build DataFrames for each metric
+        for idx, (metric, std_metric, title) in enumerate(
+            zip(metric_keys, std_keys, titles)
+        ):
+            data = []
+            for (i, j), values in results[layer].items():
+                if i < j:  # Only upper triangle
+                    mean_value = values[metric]
+                    std_value = values[std_metric]
+                    data.append(
+                        {
+                            "Layer_i": i,
+                            "Layer_j": j,
+                            "Value": mean_value,
+                            "Std": std_value,
+                        }
+                    )
+            if not data:
+                print(f"No data for {metric} in layer {layer}")
+                continue
+            df = pd.DataFrame(data)
+
+            # Plot with plotnine
+            p = (
+                ggplot(df, aes(x="Layer_j", y="Layer_i", fill="Value"))
+                + geom_tile()
+                + scale_fill_gradient(low="#440154", high="#FDE725")
+                + labs(
+                    title=f"Layer {layer} - {title}",
+                    x="Layer j",
+                    y="Layer i",
+                    fill=metric.replace("_", " ").title(),
+                )
+                + theme_minimal()
+                + theme(
+                    figure_size=(10, 8),
+                    axis_text_x=element_text(rotation=90, hjust=1, size=10),
+                    axis_text_y=element_text(size=10),
+                    title=element_text(size=14),
+                )
+            )
+            # Optionally add text annotations for mean/std
+            p = p + geom_text(
+                aes(
+                    label=df.apply(
+                        lambda row: f"{row['Value']:.2f}\n({row['Std']:.2f})", axis=1
+                    )
+                ),
+                size=7,
+                color="black",
+            )
+
+            plot_filename = f"{plot_cfg.plot_name}_layer_{layer}_{metric}_features.png"
+            p.save(os.path.join(plot_cfg.plot_dir, plot_filename), dpi=300)
+
+
+def plot_layer_pair_results_heatmap(
+    results,
+    num_layers,
+    plot_dir,
+    plot_name_prefix,
+    metrics=("causality", "causal_cosines", "self_cosine_similarity"),
+    vmin=None,
+    vmax=None,
+):
+    """
+    Generic heatmap plotter for layer-pair results dict.
+    Plots all (i, j) pairs for each metric as a heatmap.
+    """
+    os.makedirs(plot_dir, exist_ok=True)
+    for metric in metrics:
+        data = np.full((num_layers, num_layers), np.nan)
+        std_data = np.full((num_layers, num_layers), np.nan)
+        for i in range(num_layers):
+            for j in range(num_layers):
+                if i < j and (i, j) in results.get(i, {}):
+                    data[i, j] = results[i][(i, j)].get(metric, np.nan)
+                    std_data[i, j] = results[i][(i, j)].get(f"{metric}_std", np.nan)
+        fig, ax = plt.subplots(figsize=(10, 8))
+        im = ax.imshow(data, vmin=vmin, vmax=vmax, cmap="viridis")
+        ax.set_title(f"{plot_name_prefix}: {metric}")
+        ax.set_xlabel("Layer j")
+        ax.set_ylabel("Layer i")
+        ax.set_xticks(np.arange(num_layers))
+        ax.set_yticks(np.arange(num_layers))
+        fig.colorbar(im, ax=ax, label=metric)
+        # Annotate with mean (std)
+        for i in range(num_layers):
+            for j in range(num_layers):
+                if i < j and not np.isnan(data[i, j]):
+                    ax.text(
+                        j,
+                        i,
+                        f"{data[i, j]:.2f}\n({std_data[i, j]:.2f})",
+                        ha="center",
+                        va="center",
+                        color="w" if data[i, j] < 0.5 * (np.nanmax(data) + np.nanmin(data)) else "black",
+                        fontsize=8,
+                    )
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, f"{plot_name_prefix}_{metric}_heatmap.png"), dpi=300)
+        plt.close(fig)
+
+
+def plot_all_features_above_threshold_results(results, num_layers, plot_dir, plot_name_prefix="all_features_above_threshold"):
+    plot_layer_pair_results_heatmap(results, num_layers, plot_dir, plot_name_prefix)
+
+
+def plot_feature_index_results(results, num_layers, plot_dir, plot_name_prefix="feature_index"):
+    plot_layer_pair_results_heatmap(results, num_layers, plot_dir, plot_name_prefix)
+
+
+def plot_fixed_i_results(results, num_layers, plot_dir, plot_name_prefix="fixed_i"):
+    plot_layer_pair_results_heatmap(results, num_layers, plot_dir, plot_name_prefix)
+
+
+def plot_binned_features_results(results, num_layers, plot_dir, plot_name_prefix="binned_features"):
+    plot_layer_pair_results_heatmap(results, num_layers, plot_dir, plot_name_prefix)

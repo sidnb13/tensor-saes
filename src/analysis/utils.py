@@ -1,9 +1,16 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import datasets
 import torch
 from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PretrainedConfig,
+    PreTrainedTokenizerBase,
+)
 
 from src.sae.data import chunk_and_tokenize
 from src.sae.logger import get_logger
@@ -16,15 +23,16 @@ class SaeWeights:
     feature_encoder_weights: torch.Tensor
     feature_encoder_bias: torch.Tensor
     feature_decoder_weights: torch.Tensor
-    feature_decoder_bias: torch.Tensor
+    feature_decoder_bias: Optional[torch.Tensor]
 
 
 def load_base_model(
     model_name: str, device: str = "cuda"
-) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
+) -> tuple[AutoModelForCausalLM, PretrainedConfig, PreTrainedTokenizerBase]:
     model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    config = AutoConfig.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    return model, tokenizer
+    return model, config, tokenizer
 
 
 def load_sae_from_ckpt(ckpt_path: str, device: str = "cuda") -> SaeWeights:
@@ -41,6 +49,98 @@ def load_sae_from_ckpt(ckpt_path: str, device: str = "cuda") -> SaeWeights:
         feature_decoder_weights=feature_decoder_weights,
         feature_decoder_bias=feature_decoder_bias,
     )
+
+
+def filter_inactive_features(
+    feature_activation_rate: torch.Tensor,
+    sae_weights: SaeWeights,
+    min_activation_rate: float = 0.01,
+) -> SaeWeights:
+    """
+    Filter out features with activation rates below the specified threshold.
+
+    Args:
+    feature_activation_rate (torch.Tensor): Tensor of feature activation rates.
+    sae_weights (SaeWeights): SaeWeights dataclass containing encoder/decoder weights and biases.
+    min_activation_rate (float): Minimum activation rate threshold. Default is 0.01.
+
+    Returns:
+    SaeWeights: Filtered SaeWeights dataclass with only active features.
+    """
+    # Identify features with activation rate above the threshold
+    active_features = torch.where(feature_activation_rate > min_activation_rate)[0]
+
+    # Create filtered versions of encoder and decoder components
+    filtered_feature_encoder_weights = sae_weights.feature_encoder_weights[
+        active_features
+    ]
+    filtered_feature_encoder_bias = sae_weights.feature_encoder_bias[active_features]
+    filtered_feature_decoder_weights = sae_weights.feature_decoder_weights[
+        active_features
+    ]
+    filtered_feature_decoder_bias = (
+        sae_weights.feature_decoder_bias[active_features]
+        if sae_weights.feature_decoder_bias is not None
+        else None
+    )
+
+    return SaeWeights(
+        feature_encoder_weights=filtered_feature_encoder_weights,
+        feature_encoder_bias=filtered_feature_encoder_bias,
+        feature_decoder_weights=filtered_feature_decoder_weights,
+        feature_decoder_bias=filtered_feature_decoder_bias,  # type: ignore
+    )
+
+
+def bin_features_by_layer(feature_encoder_weights, feature_decoder_weights, num_layers):
+    def calculate_layer_norms(weights, num_layers):
+        """Calculate norms for each layer of the given weights."""
+        layer_size = weights.shape[1] // num_layers
+        layer_weights = torch.split(weights, layer_size, dim=1)
+        return torch.stack([layer.norm(dim=1) for layer in layer_weights])
+
+    """Bin features by their max norm layer for both encoder and decoder."""
+    enc_norms = calculate_layer_norms(feature_encoder_weights, num_layers)
+    dec_norms = calculate_layer_norms(feature_decoder_weights, num_layers)
+
+    enc_max_norm_layers = enc_norms.argmax(dim=0).tolist()
+    dec_max_norm_layers = dec_norms.argmax(dim=0).tolist()
+
+    enc_layer_features = [[] for _ in range(num_layers)]
+    dec_layer_features = [[] for _ in range(num_layers)]
+
+    for feature_idx, (enc_layer_idx, dec_layer_idx) in enumerate(
+        zip(enc_max_norm_layers, dec_max_norm_layers)
+    ):
+        enc_layer_features[enc_layer_idx].append(feature_idx)
+        dec_layer_features[dec_layer_idx].append(feature_idx)
+
+    enc_layer_features = [
+        torch.tensor(features, device=feature_encoder_weights.device)
+        for features in enc_layer_features
+    ]
+    dec_layer_features = [
+        torch.tensor(features, device=feature_decoder_weights.device)
+        for features in dec_layer_features
+    ]
+
+    return enc_layer_features, dec_layer_features
+
+
+def calculate_layer_norms(weights: torch.Tensor, num_layers: int) -> torch.Tensor:
+    """Calculate norms for each layer of the given weights."""
+    layer_size = weights.shape[1] // num_layers
+    layer_weights = torch.split(weights, layer_size, dim=1)
+    return torch.stack([layer.norm(dim=1) for layer in layer_weights])
+
+
+def filter_features_by_layer(
+    encoder_norms: torch.Tensor, decoder_norms: torch.Tensor, layer_index: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Filter features where the specified layer has the largest norm."""
+    max_norm_layers = encoder_norms.argmax(dim=0)
+    layer_mask = max_norm_layers == layer_index
+    return encoder_norms[:, layer_mask], decoder_norms[:, layer_mask], layer_mask
 
 
 def set_layer_weights(model: AutoModelForCausalLM, k: int, value: float = 0.0):
@@ -102,3 +202,27 @@ def load_dataset_simple(
 
     tokenized = chunk_and_tokenize(dataset, tokenizer, max_seq_len=seq_len)
     return tokenized
+
+
+def create_random_sae_weights(
+    num_latents: int, d_in: int, device: str = "cpu"
+) -> SaeWeights:
+    """
+    Create random SAE weights for debug mode.
+    Args:
+        num_latents (int): Number of latent features.
+        d_in (int): Input dimension.
+        device (str): Device to create tensors on.
+    Returns:
+        SaeWeights: Randomly initialized SAE weights.
+    """
+    feature_encoder_weights = torch.randn(num_latents, d_in, device=device)
+    feature_encoder_bias = torch.zeros(num_latents, device=device)
+    feature_decoder_weights = torch.randn(num_latents, d_in, device=device)
+    feature_decoder_bias = torch.zeros(num_latents, device=device)
+    return SaeWeights(
+        feature_encoder_weights=feature_encoder_weights,
+        feature_encoder_bias=feature_encoder_bias,
+        feature_decoder_weights=feature_decoder_weights,
+        feature_decoder_bias=feature_decoder_bias,
+    )

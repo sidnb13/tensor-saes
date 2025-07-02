@@ -1,0 +1,27 @@
+# @package _global_
+defaults:
+  - override /hydra/job_logging: default
+
+hydra:
+  job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: "%(log_color)s[%(asctime)s] %(levelname)-7s %(name)s:%(lineno)d%(reset)s → %(message)s"
+        datefmt: "%H:%M:%S"
+        class: colorlog.ColoredFormatter
+        log_colors:
+          DEBUG: cyan
+          INFO: green
+          WARNING: yellow
+          ERROR: red
+          CRITICAL: bold_red
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: DEBUG
+      handlers: [console]
+    disable_existing_loggers: true
