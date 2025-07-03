@@ -10,11 +10,18 @@ sae:
   seq_len: 128
   num_latents: 512
   model_name: EleutherAI/pythia-14m
+  filtering_strategy: acc_features
+  filtering_threshold: 1e-3
 
 test_size: 0.8
-global_max_ds_size: 1000
+global_max_ds_size: 500
 seed: 42
 test_sequence_index: 0
+marginalize_across_sequences: true
+
+stats_batch_size: 512
+causal_batch_size: 128
+marginalization_batch_size: 64
 
 debug: false
-device: cpu
+device: cuda

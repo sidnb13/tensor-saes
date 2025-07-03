@@ -1,22 +1,25 @@
+import inspect
+import random
 from dataclasses import dataclass
-from functools import partial
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import torch
 from datasets import Dataset
 from einops import einsum
-from torch.func import functional_call, jacrev, vjp, vmap
+from torch.func import functional_call, jacrev, jvp, vjp, vmap
 from torch.nn import functional as F
 
 from src.analysis.stats import GlobalFeatureStatistics
+from src.sae.utils import get_layer_list, send_to_device
 
 
 @dataclass
 class InterventionOutputs:
     activation_positions: Optional[torch.Tensor]
-    clean_base_outputs: Optional[torch.Tensor]
+    clean_base_outputs: Optional[Any]
     intervened_later_outputs: Optional[torch.Tensor]
+    input_kwargs: Any
     v_j: Optional[torch.Tensor]
     v_k: Optional[torch.Tensor]
     is_valid: Optional[torch.Tensor]
@@ -24,17 +27,61 @@ class InterventionOutputs:
 
 @dataclass
 class CausalAttributionStrengthResult:
-    proportion_explained: torch.Tensor
-    causal_cosine: torch.Tensor
-    error: torch.Tensor
-    relative_error: torch.Tensor
+    proportion_explained: float
+    causal_cosine: float
+    error: float
+    relative_error: float
     jvp: torch.Tensor
     v_j: Optional[torch.Tensor]
     v_k: Optional[torch.Tensor]
     is_valid: Optional[torch.Tensor]
 
 
-def compute_jacobian(model, j_activations, pos, j, k, sum_over_tokens: bool = True):
+def run_layers_forward_to_k(
+    layers,
+    j: int,
+    k: int,
+    input_tensor: Any,
+    input_kwargs: Dict[str, Any],
+    input_transform: Callable[[Any], Any] = lambda x: x,
+    output_transform: Callable[[Any], Any] = lambda x: x,
+):
+    activations = input_transform(input_tensor)
+    for layer in layers[j : k + 1]:
+        params = {
+            name: cast(torch.Tensor, param) for name, param in layer.named_parameters()
+        }
+        sig = inspect.signature(layer.forward)
+        layer_kwargs = {
+            name: input_kwargs[name]
+            for name in sig.parameters.keys()
+            if input_kwargs and name in input_kwargs
+        }
+        if isinstance(activations, (tuple, list)):
+            out = functional_call(
+                layer,
+                params,
+                tuple(activations),
+                layer_kwargs,
+            )
+        else:
+            out = functional_call(
+                layer,
+                params,
+                (activations,),
+                layer_kwargs,
+            )
+        activations = out
+    return output_transform(activations)
+
+
+def get_main_activation(output):
+    if isinstance(output, (tuple, list)):
+        return output[0]
+    return output
+
+
+def compute_jacobian(model, j_activations, input_kwargs, pos, j, k):
     """
     Compute batched Jacobians of layer k's activations w.r.t. layer j's activations for select tokens.
 
@@ -48,35 +95,30 @@ def compute_jacobian(model, j_activations, pos, j, k, sum_over_tokens: bool = Tr
     Returns:
     - Batch of Jacobians
     """
-    j_activations.requires_grad_(True)
+    main_j_activations = get_main_activation(j_activations)
+    main_j_activations.requires_grad_(True)
+    _, layers = get_layer_list(model)  # type: ignore
 
     def forward_to_k(x):
-        activations = x.unsqueeze(1)
-        for layer_idx in range(j, k + 1):
-            layer, params = get_layer_and_params(model, layer_idx)
-            activations = functional_call(layer, params, activations)[0]
-        return activations
-
-    def get_layer_and_params(model, layer_idx):
-        if "gpt2" in model.__class__.__name__.lower():
-            layer = model.transformer.h[layer_idx]
-        else:
-            layer = model.gpt_neox.layers[layer_idx]
-        return layer, dict(layer.named_parameters())
+        return run_layers_forward_to_k(
+            layers,
+            j,
+            k,
+            x,
+            input_transform=lambda x: x.unsqueeze(1),
+            output_transform=lambda x: x,
+            input_kwargs=input_kwargs,
+        )
 
     # Create a mask for the selected positions
-    batch_size, seq_len = j_activations.shape[:2]
+    batch_size, seq_len = main_j_activations.shape[:2]
     mask = torch.zeros(
-        (batch_size, seq_len), device=j_activations.device, dtype=torch.bool
+        (batch_size, seq_len), device=main_j_activations.device, dtype=torch.bool
     )
     mask[pos[:, 0], pos[:, 1]] = True
 
     # Select activations for specified positions
-    selected_activations = j_activations * mask.unsqueeze(-1)
-
-    # Sum the selected activations for each batch
-    if sum_over_tokens:
-        selected_activations = selected_activations.sum(dim=1, keepdim=True)
+    selected_activations = main_j_activations * mask.unsqueeze(-1)
 
     # Compute Jacobian
     jacobian = vmap(jacrev(forward_to_k))(selected_activations)
@@ -84,63 +126,49 @@ def compute_jacobian(model, j_activations, pos, j, k, sum_over_tokens: bool = Tr
     return jacobian.squeeze()
 
 
-def compute_jvp(model, j_activations, j, k, v_j, sum_over_tokens=False):
+def compute_jvp(model, j_activations, input_kwargs, j, k, v_j, sum_over_tokens=False):
     """
-    Compute batched Jacobian-vector products (JVPs) of layer k's activations w.r.t. layer j's activations for select tokens.
+    Compute batched Jacobian-vector products (JVPs) of layer k's activations w.r.t. layer j's activations for the full sequence.
 
     Args:
     - model: The language model (GPTNeoXModel or similar)
     - j_activations: Activations of layer j (shape: [batch_size, seq_len, hidden_size])
     - j: Index of the input layer
     - k: Index of the output layer
-    - v_j: The vector to compute the JVP with (shape: [batch_size, hidden_size])
+    - v_j: The vector to compute the JVP with (shape: [batch_size, hidden_size] or [batch_size, seq_len, hidden_size])
     - sum_over_tokens: Whether to sum over tokens or not
 
     Returns:
     - Batch of JVPs
     """
-
-    def get_layer_and_params(model, layer_idx):
-        if "gpt2" in model.__class__.__name__.lower():
-            layer = model.transformer.h[layer_idx]
-        else:
-            layer = model.gpt_neox.layers[layer_idx]
-        return layer, dict(layer.named_parameters())
+    main_j_activations = get_main_activation(j_activations)
+    _, layers = get_layer_list(model)  # type: ignore
 
     def forward_to_k(x):
-        activations = x[None, None, :]
-        for layer_idx in range(j, k + 1):
-            layer, params = get_layer_and_params(model, layer_idx)
-            activations = functional_call(layer, params, activations)[0]
-        return activations.squeeze()
+        return run_layers_forward_to_k(
+            layers,
+            j,
+            k,
+            x,
+            input_kwargs=input_kwargs,
+        )
 
-    # Compute VJP for a single token
-    def single_token_vjp(activation, v):
-        _, vjp_fn = vjp(forward_to_k, activation)  # type: ignore
-        return vjp_fn(v)[0]
+    # Expand v_j to [batch, seq, hidden] if needed
+    if v_j.shape != main_j_activations.shape:
+        v_j = v_j.expand_as(main_j_activations)
 
-    # Flatten batch and sequence dimensions
-    batch_size, seq_len, hidden_size = j_activations.shape
-    flat_activations = j_activations.reshape(-1, hidden_size)
-    # Expand v_j to match j_activations shape and then flatten
-    flat_v_j = v_j.unsqueeze(1).expand(batch_size, seq_len, -1).reshape(-1, hidden_size)
-    # Vmap over flattened batch and sequence dimensions
-    flat_vjps = vmap(single_token_vjp)(flat_activations, flat_v_j)
-
-    # Reshape back to original dimensions
-    all_vjps = flat_vjps.reshape(batch_size, seq_len, hidden_size)
+    # Compute JVP for the whole sequence
+    _, jvp_out = jvp(forward_to_k, (main_j_activations,), (v_j,))[:2]
 
     if sum_over_tokens:
-        return all_vjps.sum(dim=1)
+        return jvp_out[0].sum(dim=1)
     else:
-        return all_vjps
+        return jvp_out[0]
 
 
 def perform_intervention(
     model: torch.nn.Module,
-    batch: Dict[str, torch.Tensor],
-    global_feature_activation_rate: Optional[torch.Tensor],
-    global_acc_feature_activations: Optional[torch.Tensor],
+    batch: Any,
     intervention_index: int,
     readout_index: int,
     feature_encoder_weights: torch.Tensor,
@@ -148,7 +176,7 @@ def perform_intervention(
     feature_decoder_weights: torch.Tensor,
     lambda_value: float = 1.0,
     num_tokens: int = 1,
-    feature_top_k: int = 1,
+    feature_idx: int = 0,
     exclude_first_k_tokens: int = 0,
     sae_top_k: int = 128,
 ) -> InterventionOutputs:
@@ -158,8 +186,6 @@ def perform_intervention(
     Args:
         model: The PyTorch model to intervene on.
         batch: Input tensor to the model.
-        global_feature_activation_rate: the global feature activation rate statistic
-        global_acc_feature_activations: the global accumulated feature activations statistic
         intervention_index: Index of the layer to intervene on.
         readout_index: Index of the layer to read out from.
         feature_encoder_weights: Weights of the SAE encoder.
@@ -167,43 +193,35 @@ def perform_intervention(
         feature_decoder_weights: Weights of the SAE decoder.
         lambda_value: Strength of the intervention (default: 1.0).
         num_tokens: Number of tokens to intervene on (default: 1).
-        feature_top_k: Index of the specific feature to intervene on.
+        feature_idx: Index of the specific feature to intervene on.
         exclude_first_k_tokens: Number of tokens to exclude from the beginning (default: 0).
 
     Returns:
         the results of the intervention as an InterventionOutputs object
     """
-
     activation_positions = None
     clean_base_outputs = None
-    intervened_late_outputs = None
-    # j < k in layer idx
+    intervened_later_outputs = None
     v_j = None
     v_k = None
     is_valid = None
+    layer_offset = intervention_index
+    pre_intervention_output_kwargs = {}
 
     num_tokens = min(
         num_tokens, max(1, batch["input_ids"].shape[0] - exclude_first_k_tokens)
     )
 
-    # Compute top-k index based on global activation rates
-    # (or accumulated activation for each feature)
-    tensor = (
-        global_feature_activation_rate
-        if global_acc_feature_activations is None
-        else global_acc_feature_activations
-    )
-    assert tensor is not None, "Activation rate tensor must not be None"
-    _, top_k_feature_index = torch.kthvalue(tensor, k=feature_top_k)
-
-    def strengthen_specific_features(module, input, output, layer_offset=0):
+    def strengthen_and_capture(module, input, kwargs, output):
         nonlocal \
             activation_positions, \
             clean_base_outputs, \
-            intervened_late_outputs, \
+            intervened_later_outputs, \
             v_j, \
             v_k, \
-            is_valid
+            is_valid, \
+            pre_intervention_output_kwargs, \
+            layer_offset
 
         embed_dim = output[0].shape[-1]
         feature_encoder_segment = feature_encoder_weights[
@@ -222,7 +240,11 @@ def perform_intervention(
         ]
 
         batch_size, seq_len, _ = output[0].shape
-        clean_base_outputs = output[0]
+        clean_base_outputs = output
+
+        # Capture output kwargs for jacobian computation
+        pre_intervention_output_kwargs.clear()
+        pre_intervention_output_kwargs.update(kwargs)
 
         # Encode input activations after excluding first k tokens
         feature_activation = (
@@ -243,17 +265,17 @@ def perform_intervention(
         sae_top_k_mask.scatter_(2, top_k_indices, 1)
 
         # Get the decoder vectors for the specified feature index
-        v_j = feature_decoder_segment[None, top_k_feature_index, :]
+        v_j = feature_decoder_segment[None, feature_idx, :]
 
         # Select the tokens where the feature is active
-        token_mask = (
-            feature_activation[:, :, top_k_feature_index] > 0
-        ) & sae_top_k_mask[:, :, top_k_feature_index]
+        token_mask = (feature_activation[:, :, feature_idx] > 0) & sae_top_k_mask[
+            :, :, feature_idx
+        ]
         activation_positions = token_mask.nonzero()
         activation_positions[:, 1] += output[0].shape[1] - token_mask.shape[1]
 
         new_output = output[0].clone()
-        intervened_late_outputs = new_output
+        intervened_later_outputs = new_output
         # Add intervention lambda * v_j to selected token positions after exclusion
         new_output[:, exclude_first_k_tokens:] += lambda_value * torch.einsum(
             "be,bs->bse", v_j, token_mask
@@ -268,7 +290,7 @@ def perform_intervention(
             )
             * embed_dim,
         ]
-        v_k = intervention_decoder_segment[None, top_k_feature_index, :]
+        v_k = intervention_decoder_segment[None, feature_idx, :]
 
         # Check if the feature fires in any of the tokens after exclusion
         is_valid = token_mask.bool()
@@ -289,32 +311,32 @@ def perform_intervention(
 
         # Update is_valid with the extended mask
         is_valid = extended_token_mask
-
         # Update activation_positions
         activation_positions = is_valid.nonzero()
 
         return tuple(new_outputs)
 
-    if "gpt" in model.__class__.__name__.lower():
-        intervention_hook = model.transformer.h[  # type: ignore
-            intervention_index
-        ].register_forward_hook(  # type: ignore
-            partial(strengthen_specific_features, layer_offset=intervention_index)
-        )
-    else:
-        intervention_hook = model.gpt_neox.layers[  # type: ignore
-            intervention_index
-        ].register_forward_hook(  # type: ignore
-            partial(strengthen_specific_features, layer_offset=intervention_index)
-        )
+    _, layers = get_layer_list(model)  # type: ignore
+    batch = send_to_device(batch, model.device)
 
-    with intervention_hook, torch.no_grad():
-        model(**batch)
+    # Register only one hook that does both intervention and capturing
+    intervention_hook = layers[intervention_index].register_forward_hook(
+        strengthen_and_capture, with_kwargs=True
+    )
+
+    try:
+        with torch.no_grad():
+            model(**batch, use_cache=False)
+    except StopIteration:
+        pass
+
+    intervention_hook.remove()
 
     return InterventionOutputs(
         activation_positions,
         clean_base_outputs,
-        intervened_late_outputs,
+        intervened_later_outputs,
+        pre_intervention_output_kwargs,  # robust static kwargs for downstream
         v_j,
         v_k,
         is_valid,
@@ -323,17 +345,17 @@ def perform_intervention(
 
 def test_linear_approx(
     model: torch.nn.Module,
-    tokenized: Dataset,
+    dataset: Dataset,
     feature_encoder_weights: torch.Tensor,
     feature_encoder_bias: torch.Tensor,
     feature_decoder_weights: torch.Tensor,
     j: int,
     k: int,
     lam: float,
-    stats: GlobalFeatureStatistics,
+    feature_idx: int = 0,
 ):
     # Collect activations from GPT2
-    sample = tokenized[0:2]["input_ids"]
+    sample = dataset[0:2]["input_ids"]
 
     # Perform intervention
     intervention = perform_intervention(
@@ -342,8 +364,6 @@ def test_linear_approx(
             "input_ids": sample.cuda(),
             "attention_mask": torch.ones_like(sample, device="cuda"),
         },
-        global_feature_activation_rate=stats.feature_activation_rate,
-        global_acc_feature_activations=stats.acc_features,
         intervention_index=j,
         readout_index=k,
         feature_encoder_weights=feature_encoder_weights,
@@ -351,7 +371,7 @@ def test_linear_approx(
         feature_decoder_weights=feature_decoder_weights,
         lambda_value=lam,
         num_tokens=1,
-        feature_top_k=1,
+        feature_idx=feature_idx,
         exclude_first_k_tokens=0,
         sae_top_k=128,
     )
@@ -363,8 +383,6 @@ def test_linear_approx(
             "input_ids": sample.cuda(),
             "attention_mask": torch.ones_like(sample, device="cuda"),
         },
-        global_feature_activation_rate=stats.feature_activation_rate,
-        global_acc_feature_activations=stats.acc_features,
         intervention_index=j,
         readout_index=k,
         feature_encoder_weights=feature_encoder_weights,
@@ -372,13 +390,18 @@ def test_linear_approx(
         feature_decoder_weights=feature_decoder_weights,
         lambda_value=0,
         num_tokens=1,
-        feature_top_k=1,
+        feature_idx=feature_idx,
         exclude_first_k_tokens=0,
     )
 
     # Compute Jacobian
     jacobian = compute_jacobian(
-        model, intervention.clean_base_outputs, intervention.activation_positions, j, k
+        model,
+        intervention.clean_base_outputs,
+        intervention.activation_positions,
+        intervention.input_kwargs,
+        j,
+        k,
     )
 
     # Check consequent_embeddings ~= original_embeddings_at_the_higher_layer + jacobian @ v_j * lam
@@ -417,30 +440,28 @@ def compute_causal_attribution_strength(
     j: int,
     k: int,
     model: torch.nn.Module,
-    inputs: Dict[str, torch.Tensor],
+    dataset_or_batch: Union[Dict[str, torch.Tensor], Dataset],
     feature_encoder_weights: torch.Tensor,
     feature_encoder_bias: torch.Tensor,
     feature_decoder_weights: torch.Tensor,
-    global_feature_activation_rate: Optional[torch.Tensor],
-    global_acc_feature_activations: Optional[torch.Tensor],
     lambda_value: float = 1.0,
     feature_idx: int = 0,
     num_tokens: int = 1,
     exclude_first_k_tokens: int = 0,
     sae_top_k: int = 128,
+    batch_size: int = 64,
 ):
     """
     Compute causal attribution strength for a specific latent feature index.
     Args:
         feature_idx: The index of the latent feature to analyze.
+        dataset: The input data, either a dict or a Dataset.
     """
 
-    def perform_intervention_and_compute_jvp():
+    def perform_intervention_and_compute_jvp(batch: Dict[str, torch.Tensor]):
         intervention = perform_intervention(
             model=model,
-            batch=inputs,
-            global_feature_activation_rate=global_feature_activation_rate,
-            global_acc_feature_activations=global_acc_feature_activations,
+            batch=batch,
             intervention_index=j,
             readout_index=k,
             feature_encoder_weights=feature_encoder_weights,
@@ -448,7 +469,7 @@ def compute_causal_attribution_strength(
             feature_decoder_weights=feature_decoder_weights,
             lambda_value=lambda_value,
             num_tokens=num_tokens,
-            feature_top_k=feature_idx + 1,  # keep this for now, but see below
+            feature_idx=feature_idx,
             exclude_first_k_tokens=exclude_first_k_tokens,
             sae_top_k=sae_top_k,
         )
@@ -456,6 +477,7 @@ def compute_causal_attribution_strength(
         jvp = compute_jvp(
             model,
             intervention.clean_base_outputs,
+            intervention.input_kwargs,
             j,
             k,
             intervention.v_j,
@@ -489,12 +511,39 @@ def compute_causal_attribution_strength(
         )
         relative_error = error / v_k_norm_squared.squeeze()
 
-        return proportion_explained, causal_cosine, error, relative_error
+        return (
+            proportion_explained.item(),
+            causal_cosine.item(),
+            error.item(),
+            relative_error.item(),
+        )
 
-    intervention, jvp = perform_intervention_and_compute_jvp()
-    proportion_explained, causal_cosine, error, relative_error = compute_metrics(
-        intervention, jvp
-    )
+    if isinstance(dataset_or_batch, Dataset):
+        total_proportion_explained = 0
+        total_causal_cosine = 0
+        total_error = 0
+        total_relative_error = 0
+
+        for i in range(0, len(dataset_or_batch), batch_size):
+            batch = dataset_or_batch[i : i + batch_size]
+            intervention, jvp = perform_intervention_and_compute_jvp(batch)
+            proportion_explained, causal_cosine, error, relative_error = (
+                compute_metrics(intervention, jvp)
+            )
+            total_proportion_explained += proportion_explained
+            total_causal_cosine += causal_cosine
+            total_error += error
+            total_relative_error += relative_error
+
+        proportion_explained = total_proportion_explained / len(dataset_or_batch)
+        causal_cosine = total_causal_cosine / len(dataset_or_batch)
+        error = total_error / len(dataset_or_batch)
+        relative_error = total_relative_error / len(dataset_or_batch)
+    else:
+        intervention, jvp = perform_intervention_and_compute_jvp(dataset_or_batch)
+        proportion_explained, causal_cosine, error, relative_error = compute_metrics(
+            intervention, jvp
+        )
 
     return CausalAttributionStrengthResult(
         proportion_explained=proportion_explained,
@@ -510,21 +559,21 @@ def compute_causal_attribution_strength(
 
 def _eval_all_features_above_threshold(
     model: torch.nn.Module,
-    input_ids: torch.Tensor,
+    dataset: Union[Dict[str, torch.Tensor], Dataset],
     feature_encoder_weights: torch.Tensor,
     feature_encoder_bias: torch.Tensor,
     feature_decoder_weights: torch.Tensor,
-    global_statistic: torch.Tensor,
     num_layers: int,
     lambda_value: float,
     num_tokens: int,
     exclude_first_k_tokens: int,
-    use_accumulated: bool,
-    activation_threshold: float,
-) -> Dict[int, Dict[Tuple[int, int], Dict[str, float]]]:
+    marginalize_across_sequences: bool,
+    feature_idx: int = 0,
+):
+    """
+    If marginalize_across_sequences is True, aggregate results over the full dataset. Otherwise, use only the provided single example.
+    """
     results = {layer: {} for layer in range(num_layers)}
-    feature_mask = global_statistic > activation_threshold
-    feature_indices = torch.arange(global_statistic.shape[0])[feature_mask]
     hidden_size = int(model.config.hidden_size)  # type: ignore
     for i in range(num_layers):
         for j in range(i + 1, num_layers):
@@ -533,24 +582,16 @@ def _eval_all_features_above_threshold(
                 "causal_cosines": [],
                 "self_cosine_similarity": [],
             }
-            for feature_idx in feature_indices:
+            for feature_idx in range(feature_encoder_weights.shape[0]):
                 idx = int(feature_idx)
-                if use_accumulated:
-                    global_feature_activation_rate = None
-                    global_acc_feature_activations = global_statistic
-                else:
-                    global_feature_activation_rate = global_statistic
-                    global_acc_feature_activations = None
                 result = compute_causal_attribution_strength(
                     j=i,
                     k=j,
                     model=model,
-                    inputs={"input_ids": input_ids.cuda()},
+                    dataset_or_batch=dataset,
                     feature_encoder_weights=feature_encoder_weights,
                     feature_encoder_bias=feature_encoder_bias,
                     feature_decoder_weights=feature_decoder_weights,
-                    global_feature_activation_rate=global_feature_activation_rate,
-                    global_acc_feature_activations=global_acc_feature_activations,
                     lambda_value=lambda_value,
                     feature_idx=idx,
                     num_tokens=num_tokens,
@@ -567,40 +608,46 @@ def _eval_all_features_above_threshold(
                 self_cosine_sim = torch.nn.functional.cosine_similarity(
                     dec_i.unsqueeze(0), dec_j.unsqueeze(0)
                 ).item()
-                if result.is_valid is not None and result.is_valid.any():
-                    valid_causality = result.proportion_explained[result.is_valid]
-                    valid_causal_cosines = result.causal_cosine[result.is_valid]
-                    layer_results["causality"].append(valid_causality)
-                    layer_results["causal_cosines"].append(valid_causal_cosines)
-                    layer_results["self_cosine_similarity"].append(
-                        torch.full((valid_causality.numel(),), self_cosine_sim)
-                    )
+                valid_causality = result.proportion_explained
+                valid_causal_cosines = result.causal_cosine
+                feature_causality = valid_causality
+                feature_causal_cosines = valid_causal_cosines
+                layer_results["causality"].append(feature_causality)
+                layer_results["causal_cosines"].append(feature_causal_cosines)
+                layer_results["self_cosine_similarity"].append(
+                    torch.tensor(self_cosine_sim)
+                )
             results[i][(i, j)] = {}
             for metric, values in layer_results.items():
                 if values:
                     stacked_values = torch.cat(values)
-                    results[i][(i, j)][metric] = stacked_values.mean().item()
-                    results[i][(i, j)][f"{metric}_std"] = stacked_values.std().item()
-                else:
-                    results[i][(i, j)][metric] = np.nan
-                    results[i][(i, j)][f"{metric}_std"] = np.nan
+                    if marginalize_across_sequences:
+                        results[i][(i, j)][metric] = stacked_values.mean().item()
+                        results[i][(i, j)][f"{metric}_std"] = (
+                            stacked_values.std().item()
+                        )
+                    else:
+                        results[i][(i, j)][metric] = np.nan
+                        results[i][(i, j)][f"{metric}_std"] = np.nan
     return results
 
 
 def _eval_feature_index(
     model: torch.nn.Module,
-    input_ids: torch.Tensor,
+    dataset: Union[Dict[str, torch.Tensor], Dataset],
     feature_encoder_weights: torch.Tensor,
     feature_encoder_bias: torch.Tensor,
     feature_decoder_weights: torch.Tensor,
-    global_statistic: torch.Tensor,
     num_layers: int,
     lambda_value: float,
     num_tokens: int,
     exclude_first_k_tokens: int,
-    use_accumulated: bool,
     feature_index: int,
-) -> Dict[int, Dict[Tuple[int, int], Dict[str, float]]]:
+    marginalize_across_sequences: bool,
+):
+    """
+    If marginalize_across_sequences is True, aggregate results over the full dataset. Otherwise, use only the provided single example.
+    """
     results = {layer: {} for layer in range(num_layers)}
     idx = int(feature_index)
     hidden_size = int(model.config.hidden_size)  # type: ignore
@@ -611,22 +658,14 @@ def _eval_feature_index(
                 "causal_cosines": [],
                 "self_cosine_similarity": [],
             }
-            if use_accumulated:
-                global_feature_activation_rate = None
-                global_acc_feature_activations = global_statistic
-            else:
-                global_feature_activation_rate = global_statistic
-                global_acc_feature_activations = None
             result = compute_causal_attribution_strength(
                 j=i,
                 k=j,
                 model=model,
-                inputs={"input_ids": input_ids.cuda()},
+                dataset_or_batch=dataset,
                 feature_encoder_weights=feature_encoder_weights,
                 feature_encoder_bias=feature_encoder_bias,
                 feature_decoder_weights=feature_decoder_weights,
-                global_feature_activation_rate=global_feature_activation_rate,
-                global_acc_feature_activations=global_acc_feature_activations,
                 lambda_value=lambda_value,
                 feature_idx=idx,
                 num_tokens=num_tokens,
@@ -643,18 +682,95 @@ def _eval_feature_index(
             self_cosine_sim = torch.nn.functional.cosine_similarity(
                 dec_i.unsqueeze(0), dec_j.unsqueeze(0)
             ).item()
-            if result.is_valid is not None and result.is_valid.any():
-                valid_causality = result.proportion_explained[result.is_valid]
-                valid_causal_cosines = result.causal_cosine[result.is_valid]
-                layer_results["causality"].append(valid_causality)
-                layer_results["causal_cosines"].append(valid_causal_cosines)
-                layer_results["self_cosine_similarity"].append(
-                    torch.full((valid_causality.numel(),), self_cosine_sim)
-                )
+            valid_causality = result.proportion_explained
+            valid_causal_cosines = result.causal_cosine
+            feature_causality = valid_causality
+            feature_causal_cosines = valid_causal_cosines
+            layer_results["causality"].append(feature_causality)
+            layer_results["causal_cosines"].append(feature_causal_cosines)
+            layer_results["self_cosine_similarity"].append(
+                torch.tensor(self_cosine_sim)
+            )
             results[i][(i, j)] = {}
             for metric, values in layer_results.items():
                 if values:
                     stacked_values = torch.cat(values)
+                    if marginalize_across_sequences:
+                        results[i][(i, j)][metric] = stacked_values.mean().item()
+                        results[i][(i, j)][f"{metric}_std"] = (
+                            stacked_values.std().item()
+                        )
+                    else:
+                        results[i][(i, j)][metric] = np.nan
+                        results[i][(i, j)][f"{metric}_std"] = np.nan
+    return results
+
+
+def _eval_fixed_i(
+    model: torch.nn.Module,
+    dataset: Union[Dict[str, torch.Tensor], Dataset],
+    feature_encoder_weights: torch.Tensor,
+    feature_encoder_bias: torch.Tensor,
+    feature_decoder_weights: torch.Tensor,
+    num_layers: int,
+    lambda_value: float,
+    num_tokens: int,
+    exclude_first_k_tokens: int,
+    fixed_i: int,
+    marginalize_across_sequences: bool,
+):
+    """
+    If marginalize_across_sequences is True, aggregate results over the full dataset. Otherwise, use only the provided single example.
+    """
+    results = {layer: {} for layer in range(num_layers)}
+    i = int(fixed_i)
+    hidden_size = int(model.config.hidden_size)  # type: ignore
+    for j in range(i + 1, num_layers):
+        layer_results = {
+            "causality": [],
+            "causal_cosines": [],
+            "self_cosine_similarity": [],
+        }
+        for feature_idx in range(feature_encoder_weights.shape[0]):
+            idx = int(feature_idx)
+            result = compute_causal_attribution_strength(
+                j=i,
+                k=j,
+                model=model,
+                dataset_or_batch=dataset,
+                feature_encoder_weights=feature_encoder_weights,
+                feature_encoder_bias=feature_encoder_bias,
+                feature_decoder_weights=feature_decoder_weights,
+                lambda_value=lambda_value,
+                feature_idx=idx,
+                num_tokens=num_tokens,
+                exclude_first_k_tokens=exclude_first_k_tokens,
+            )
+            dec_i = feature_decoder_weights[
+                idx,
+                i * hidden_size : (i + 1) * hidden_size,
+            ]
+            dec_j = feature_decoder_weights[
+                idx,
+                j * hidden_size : (j + 1) * hidden_size,
+            ]
+            self_cosine_sim = torch.nn.functional.cosine_similarity(
+                dec_i.unsqueeze(0), dec_j.unsqueeze(0)
+            ).item()
+            valid_causality = result.proportion_explained
+            valid_causal_cosines = result.causal_cosine
+            feature_causality = valid_causality
+            feature_causal_cosines = valid_causal_cosines
+            layer_results["causality"].append(feature_causality)
+            layer_results["causal_cosines"].append(feature_causal_cosines)
+            layer_results["self_cosine_similarity"].append(
+                torch.tensor(self_cosine_sim)
+            )
+        results[i][(i, j)] = {}
+        for metric, values in layer_results.items():
+            if values:
+                stacked_values = torch.cat(values)
+                if marginalize_across_sequences:
                     results[i][(i, j)][metric] = stacked_values.mean().item()
                     results[i][(i, j)][f"{metric}_std"] = stacked_values.std().item()
                 else:
@@ -663,100 +779,22 @@ def _eval_feature_index(
     return results
 
 
-def _eval_fixed_i(
-    model: torch.nn.Module,
-    input_ids: torch.Tensor,
-    feature_encoder_weights: torch.Tensor,
-    feature_encoder_bias: torch.Tensor,
-    feature_decoder_weights: torch.Tensor,
-    global_statistic: torch.Tensor,
-    num_layers: int,
-    lambda_value: float,
-    num_tokens: int,
-    exclude_first_k_tokens: int,
-    use_accumulated: bool,
-    activation_threshold: float,
-    fixed_i: int,
-) -> Dict[int, Dict[Tuple[int, int], Dict[str, float]]]:
-    results = {layer: {} for layer in range(num_layers)}
-    i = int(fixed_i)
-    feature_mask = global_statistic > activation_threshold
-    feature_indices = torch.arange(global_statistic.shape[0])[feature_mask]
-    hidden_size = int(model.config.hidden_size)  # type: ignore
-    for j in range(i + 1, num_layers):
-        layer_results = {
-            "causality": [],
-            "causal_cosines": [],
-            "self_cosine_similarity": [],
-        }
-        for feature_idx in feature_indices:
-            idx = int(feature_idx)
-            if use_accumulated:
-                global_feature_activation_rate = None
-                global_acc_feature_activations = global_statistic
-            else:
-                global_feature_activation_rate = global_statistic
-                global_acc_feature_activations = None
-            result = compute_causal_attribution_strength(
-                j=i,
-                k=j,
-                model=model,
-                inputs={"input_ids": input_ids.cuda()},
-                feature_encoder_weights=feature_encoder_weights,
-                feature_encoder_bias=feature_encoder_bias,
-                feature_decoder_weights=feature_decoder_weights,
-                global_feature_activation_rate=global_feature_activation_rate,
-                global_acc_feature_activations=global_acc_feature_activations,
-                lambda_value=lambda_value,
-                feature_idx=idx,
-                num_tokens=num_tokens,
-                exclude_first_k_tokens=exclude_first_k_tokens,
-            )
-            dec_i = feature_decoder_weights[
-                idx,
-                i * hidden_size : (i + 1) * hidden_size,
-            ]
-            dec_j = feature_decoder_weights[
-                idx,
-                j * hidden_size : (j + 1) * hidden_size,
-            ]
-            self_cosine_sim = torch.nn.functional.cosine_similarity(
-                dec_i.unsqueeze(0), dec_j.unsqueeze(0)
-            ).item()
-            if result.is_valid is not None and result.is_valid.any():
-                valid_causality = result.proportion_explained[result.is_valid]
-                valid_causal_cosines = result.causal_cosine[result.is_valid]
-                layer_results["causality"].append(valid_causality)
-                layer_results["causal_cosines"].append(valid_causal_cosines)
-                layer_results["self_cosine_similarity"].append(
-                    torch.full((valid_causality.numel(),), self_cosine_sim)
-                )
-        results[i][(i, j)] = {}
-        for metric, values in layer_results.items():
-            if values:
-                stacked_values = torch.cat(values)
-                results[i][(i, j)][metric] = stacked_values.mean().item()
-                results[i][(i, j)][f"{metric}_std"] = stacked_values.std().item()
-            else:
-                results[i][(i, j)][metric] = np.nan
-                results[i][(i, j)][f"{metric}_std"] = np.nan
-    return results
-
-
 def _eval_binned_features(
     model: torch.nn.Module,
-    input_ids: torch.Tensor,
+    dataset: Union[Dict[str, torch.Tensor], Dataset],
     feature_encoder_weights: torch.Tensor,
     feature_encoder_bias: torch.Tensor,
     feature_decoder_weights: torch.Tensor,
-    global_statistic: torch.Tensor,
     num_layers: int,
     binned_features: Sequence[Union[int, torch.Tensor]],
     lambda_value: float,
     num_tokens: int,
     exclude_first_k_tokens: int,
-    use_accumulated: bool,
-) -> Dict[int, Dict[Tuple[int, int], Dict[str, float]]]:
+    marginalize_across_sequences: bool,
+):
+    """
+    If marginalize_across_sequences is True, aggregate results over the full dataset. Otherwise, use only the provided single example.
+    """
     results = {layer: {} for layer in range(num_layers)}
     hidden_size = int(model.config.hidden_size)  # type: ignore
     for i in range(num_layers):
@@ -771,22 +809,14 @@ def _eval_binned_features(
             }
             for feature_idx in layer_features:
                 idx = int(feature_idx)
-                if use_accumulated:
-                    global_feature_activation_rate = None
-                    global_acc_feature_activations = global_statistic[layer_features]
-                else:
-                    global_feature_activation_rate = global_statistic[layer_features]
-                    global_acc_feature_activations = None
                 result = compute_causal_attribution_strength(
                     j=i,
                     k=j,
                     model=model,
-                    inputs={"input_ids": input_ids.cuda()},
+                    dataset_or_batch=dataset,
                     feature_encoder_weights=feature_encoder_weights,
                     feature_encoder_bias=feature_encoder_bias,
                     feature_decoder_weights=feature_decoder_weights,
-                    global_feature_activation_rate=global_feature_activation_rate,
-                    global_acc_feature_activations=global_acc_feature_activations,
                     lambda_value=lambda_value,
                     feature_idx=idx,
                     num_tokens=num_tokens,
@@ -803,154 +833,98 @@ def _eval_binned_features(
                 self_cosine_sim = torch.nn.functional.cosine_similarity(
                     dec_i.unsqueeze(0), dec_j.unsqueeze(0)
                 ).item()
-                if result.is_valid is not None and result.is_valid.any():
-                    valid_causality = result.proportion_explained[result.is_valid]
-                    valid_causal_cosines = result.causal_cosine[result.is_valid]
-                    layer_results["causality"].append(valid_causality)
-                    layer_results["causal_cosines"].append(valid_causal_cosines)
-                    layer_results["self_cosine_similarity"].append(
-                        torch.full((valid_causality.numel(),), self_cosine_sim)
-                    )
+                valid_causality = result.proportion_explained
+                valid_causal_cosines = result.causal_cosine
+                feature_causality = valid_causality
+                feature_causal_cosines = valid_causal_cosines
+                layer_results["causality"].append(feature_causality)
+                layer_results["causal_cosines"].append(feature_causal_cosines)
+                layer_results["self_cosine_similarity"].append(
+                    torch.tensor(self_cosine_sim)
+                )
             results[i][(i, j)] = {}
             for metric, values in layer_results.items():
                 if values:
                     stacked_values = torch.cat(values)
-                    results[i][(i, j)][metric] = stacked_values.mean().item()
-                    results[i][(i, j)][f"{metric}_std"] = stacked_values.std().item()
-                else:
-                    results[i][(i, j)][metric] = np.nan
-                    results[i][(i, j)][f"{metric}_std"] = np.nan
+                    if marginalize_across_sequences:
+                        results[i][(i, j)][metric] = stacked_values.mean().item()
+                        results[i][(i, j)][f"{metric}_std"] = (
+                            stacked_values.std().item()
+                        )
+                    else:
+                        results[i][(i, j)][metric] = np.nan
+                        results[i][(i, j)][f"{metric}_std"] = np.nan
     return results
 
 
 def run_layer_pair_evaluation(
     model: torch.nn.Module,
-    input_ids: torch.Tensor,
+    dataset: Dataset,
     feature_encoder_weights: torch.Tensor,
     feature_encoder_bias: torch.Tensor,
     feature_decoder_weights: torch.Tensor,
-    global_statistic: torch.Tensor,
     num_layers: int,
     binned_enc_features: Optional[Sequence[Union[int, torch.Tensor]]] = None,
-    marginalization_mode: str = "all_features_above_threshold",  # or "feature_index", "fixed_i", "binned_features"
-    activation_threshold: float = 0.0,
+    marginalization_mode: str = "all_features_above_threshold",
     feature_index: Optional[int] = None,
     fixed_i: Optional[int] = None,
     lambda_value: float = 1.0,
     num_tokens: int = 1,
     exclude_first_k_tokens: int = 0,
-    use_accumulated: bool = False,
     marginalize_across_sequences: bool = False,
-    tokenized_batch: Optional[Sequence[Dict[str, torch.Tensor]]] = None,
 ) -> Dict[int, Dict[Tuple[int, int], Dict[str, float]]]:
     """
-    Evaluate layer pairs with flexible marginalization schemes, optionally across a batch of sequences.
+    Evaluate layer pairs with flexible marginalization schemes.
     Args:
-        input_ids: torch.Tensor of token ids (batch, seq_len)
-        marginalization_mode: one of ["all_features_above_threshold", "feature_index", "fixed_i", "binned_features"]
-        activation_threshold: used for all_features_above_threshold and fixed_i
-        feature_index: used for feature_index mode
-        fixed_i: used for fixed_i mode
-        marginalize_across_sequences: if True, aggregate results across tokenized_batch
-        tokenized_batch: list of dicts, each with 'input_ids' (and optionally 'attention_mask')
+        dataset: Either a dict (single sequence) or a Dataset (multiple sequences)
+        marginalize_across_sequences: if True, aggregate results across all sequences in dataset, else use a single random example
     Returns:
         Nested dict: {i: {(i, j): {metric: value, ...}, ...}, ...}
     """
-    if marginalize_across_sequences:
-        assert tokenized_batch is not None and len(tokenized_batch) > 0, "tokenized_batch must be provided if marginalizing across sequences"
-        # Collect results for each sequence
-        all_results = []
-        for seq in tokenized_batch:
-            seq_input_ids = seq["input_ids"]
-            # Call recursively with marginalize_across_sequences=False
-            result = run_layer_pair_evaluation(
-                model,
-                seq_input_ids,
-                feature_encoder_weights,
-                feature_encoder_bias,
-                feature_decoder_weights,
-                global_statistic,
-                num_layers,
-                binned_enc_features=binned_enc_features,
-                marginalization_mode=marginalization_mode,
-                activation_threshold=activation_threshold,
-                feature_index=feature_index,
-                fixed_i=fixed_i,
-                lambda_value=lambda_value,
-                num_tokens=num_tokens,
-                exclude_first_k_tokens=exclude_first_k_tokens,
-                use_accumulated=use_accumulated,
-                marginalize_across_sequences=False,
-                tokenized_batch=None,
-            )
-            all_results.append(result)
-        # Aggregate results: for each i, (i,j), metric, collect values and compute mean/std
-        # Assume all dicts have the same structure
-        agg_results = {}
-        for i in all_results[0]:
-            agg_results[i] = {}
-            for pair in all_results[0][i]:
-                agg_results[i][pair] = {}
-                # Find all metrics
-                metrics = all_results[0][i][pair].keys()
-                for metric in metrics:
-                    vals = [res[i][pair][metric] for res in all_results]
-                    # Only aggregate if not nan
-                    vals = [v for v in vals if v == v]  # filter out nan
-                    if len(vals) == 0:
-                        agg_results[i][pair][metric] = float('nan')
-                    else:
-                        agg_results[i][pair][metric] = float(torch.tensor(vals).mean())
-                        agg_results[i][pair][f"{metric}_std"] = float(torch.tensor(vals).std())
-        return agg_results
-    # Original logic for a single sequence
+    if not marginalize_across_sequences:
+        dataset = dataset.select(random.sample(range(len(dataset)), 1))
     if marginalization_mode == "all_features_above_threshold":
         return _eval_all_features_above_threshold(
             model,
-            input_ids,
+            dataset,
             feature_encoder_weights,
             feature_encoder_bias,
             feature_decoder_weights,
-            global_statistic,
             num_layers,
             lambda_value,
             num_tokens,
             exclude_first_k_tokens,
-            use_accumulated,
-            activation_threshold,
+            marginalize_across_sequences,
         )
     elif marginalization_mode == "feature_index":
         assert feature_index is not None, "feature_index must be provided for this mode"
         return _eval_feature_index(
             model,
-            input_ids,
+            dataset,
             feature_encoder_weights,
             feature_encoder_bias,
             feature_decoder_weights,
-            global_statistic,
             num_layers,
             lambda_value,
             num_tokens,
             exclude_first_k_tokens,
-            use_accumulated,
             feature_index,
+            marginalize_across_sequences,
         )
     elif marginalization_mode == "fixed_i":
         assert fixed_i is not None, "fixed_i must be provided for this mode"
         return _eval_fixed_i(
             model,
-            input_ids,
+            dataset,
             feature_encoder_weights,
             feature_encoder_bias,
             feature_decoder_weights,
-            global_statistic,
             num_layers,
             lambda_value,
             num_tokens,
             exclude_first_k_tokens,
-            use_accumulated,
-            activation_threshold,
             fixed_i,
+            marginalize_across_sequences,
         )
     elif marginalization_mode == "binned_features":
         assert binned_enc_features is not None, (
@@ -958,17 +932,16 @@ def run_layer_pair_evaluation(
         )
         return _eval_binned_features(
             model,
-            input_ids,
+            dataset,
             feature_encoder_weights,
             feature_encoder_bias,
             feature_decoder_weights,
-            global_statistic,
             num_layers,
             binned_enc_features,
             lambda_value,
             num_tokens,
             exclude_first_k_tokens,
-            use_accumulated,
+            marginalize_across_sequences,
         )
     else:
         raise ValueError(f"Unknown marginalization_mode: {marginalization_mode}")

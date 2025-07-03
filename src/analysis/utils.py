@@ -8,10 +8,11 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
-    PretrainedConfig,
-    PreTrainedTokenizerBase,
+    PretrainedConfig,  # type: ignore
+    PreTrainedTokenizerBase,  # type: ignore
 )
 
+from src.analysis.stats import GlobalFeatureStatistics
 from src.sae.data import chunk_and_tokenize
 from src.sae.logger import get_logger
 
@@ -29,7 +30,9 @@ class SaeWeights:
 def load_base_model(
     model_name: str, device: str = "cuda"
 ) -> tuple[AutoModelForCausalLM, PretrainedConfig, PreTrainedTokenizerBase]:
-    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, device_map={"": device}, attn_implementation="eager"
+    )
     config = AutoConfig.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, config, tokenizer
@@ -52,25 +55,34 @@ def load_sae_from_ckpt(ckpt_path: str, device: str = "cuda") -> SaeWeights:
 
 
 def filter_inactive_features(
-    feature_activation_rate: torch.Tensor,
+    stats: GlobalFeatureStatistics,
     sae_weights: SaeWeights,
     min_activation_rate: float = 0.01,
-) -> SaeWeights:
+    strategy: str = "activation_rate",
+    acc_features_threshold: float = 1e-3,
+) -> tuple[SaeWeights, GlobalFeatureStatistics]:
     """
-    Filter out features with activation rates below the specified threshold.
+    Filter out features using the specified strategy.
 
     Args:
-    feature_activation_rate (torch.Tensor): Tensor of feature activation rates.
-    sae_weights (SaeWeights): SaeWeights dataclass containing encoder/decoder weights and biases.
-    min_activation_rate (float): Minimum activation rate threshold. Default is 0.01.
+        stats (GlobalFeatureStatistics): Statistics containing feature metrics.
+        sae_weights (SaeWeights): SAE weights dataclass.
+        min_activation_rate (float): Minimum activation rate threshold (for 'activation_rate' strategy).
+        strategy (str): Filtering strategy, either 'activation_rate' or 'acc_features'.
+        acc_features_threshold (float): Threshold for acc_features (for 'acc_features' strategy).
 
     Returns:
-    SaeWeights: Filtered SaeWeights dataclass with only active features.
+        SaeWeights: Filtered SaeWeights dataclass with only active features.
     """
-    # Identify features with activation rate above the threshold
-    active_features = torch.where(feature_activation_rate > min_activation_rate)[0]
+    if strategy == "activation_rate":
+        active_features = torch.where(
+            stats.feature_activation_rate > min_activation_rate
+        )[0]
+    elif strategy == "acc_features":
+        active_features = torch.where(stats.acc_features > acc_features_threshold)[0]
+    else:
+        raise ValueError(f"Unknown filtering strategy: {strategy}")
 
-    # Create filtered versions of encoder and decoder components
     filtered_feature_encoder_weights = sae_weights.feature_encoder_weights[
         active_features
     ]
@@ -84,12 +96,24 @@ def filter_inactive_features(
         else None
     )
 
-    return SaeWeights(
+    filtered_sae_weights = SaeWeights(
         feature_encoder_weights=filtered_feature_encoder_weights,
         feature_encoder_bias=filtered_feature_encoder_bias,
         feature_decoder_weights=filtered_feature_decoder_weights,
         feature_decoder_bias=filtered_feature_decoder_bias,  # type: ignore
     )
+
+    filtered_stats = GlobalFeatureStatistics(
+        feature_activation_rate=stats.feature_activation_rate[active_features.cpu()],
+        global_activation_mask=stats.global_activation_mask[active_features.cpu()],
+        acc_features=stats.acc_features[active_features.cpu()],
+        total_active_features=stats.total_active_features,
+        avg_active_features_per_token=stats.avg_active_features_per_token,
+        feature_dict=stats.feature_dict,
+        n_tokens=stats.n_tokens,
+    )
+
+    return filtered_sae_weights, filtered_stats
 
 
 def bin_features_by_layer(feature_encoder_weights, feature_decoder_weights, num_layers):

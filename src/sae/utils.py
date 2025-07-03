@@ -226,3 +226,11 @@ else:
         decoder_impl = eager_decode
     else:
         decoder_impl = triton_decode
+
+
+def move_batch_to_device(batch: dict, device: torch.device | str) -> dict:
+    """
+    Move all tensors in a batch dictionary to the specified device.
+    Non-tensor values are left unchanged.
+    """
+    return {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}

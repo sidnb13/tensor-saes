@@ -16,8 +16,6 @@ class FeatureStats:
 @dataclass
 class GlobalFeatureStatistics:
     feature_activation_rate: torch.Tensor
-    tokenwise_feature_activation_rate: torch.Tensor
-    sequencewise_feature_activation_rate: torch.Tensor
     global_activation_mask: torch.Tensor
     acc_features: torch.Tensor
     total_active_features: float
@@ -26,27 +24,20 @@ class GlobalFeatureStatistics:
     n_tokens: int
 
 
+@torch.no_grad()
 def compute_feature_statistics(
     model,
     tokenized,
     feature_encoder_weights,
     feature_encoder_bias,
     sae_top_k: int = 128,
-    batch_size: int = 256,
+    batch_size: int = 128,
     exclude_first_k_tokens: int = 0,
     seq_len: int = 64,
 ):
     # (N,)
     global_feature_activation_frequencies = torch.zeros(
         feature_encoder_weights.shape[0], device=model.device
-    )
-    tokenwise_feature_activation_frequencies = torch.zeros(
-        seq_len - exclude_first_k_tokens,
-        feature_encoder_weights.shape[0],
-        device=model.device,
-    )
-    sequencewise_feature_activation_frequencies = torch.zeros(
-        len(tokenized), feature_encoder_weights.shape[0], device=model.device
     )
     global_feature_activation_mask = torch.zeros(
         len(tokenized),
@@ -69,13 +60,13 @@ def compute_feature_statistics(
         input_ids = batch["input_ids"].to(model.device)
         attention_mask = torch.ones_like(input_ids, device=model.device)
 
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-            )
-            hiddens = outputs.hidden_states
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+        hiddens = outputs.hidden_states
 
         stacked_hiddens = torch.cat(hiddens[1:], dim=-1)[:, exclude_first_k_tokens:, :]
 
@@ -99,27 +90,13 @@ def compute_feature_statistics(
 
         n_tokens += input_ids.shape[0] * (input_ids.shape[1] - exclude_first_k_tokens)
         global_feature_activation_frequencies += batch_binary_mask.sum(dim=(0, 1))
-        sequencewise_feature_activation_frequencies[
-            i * batch_size : (i + 1) * batch_size
-        ] += batch_binary_mask.sum(dim=1)
-
-        tokenwise_feature_activation_frequencies += batch_binary_mask.sum(dim=0)
         global_acc_feature_activations += (encoded_features * batch_binary_mask).sum(
             dim=(0, 1)
         )
 
-    # Normalize to top-k rather not 1
     feature_activation_rate = global_feature_activation_frequencies / n_tokens
-    tokenwise_feature_activation_rate = (
-        (seq_len - exclude_first_k_tokens)
-        * tokenwise_feature_activation_frequencies
-        / n_tokens
-    )
     normalized_acc_features = (
         global_acc_feature_activations / global_feature_activation_frequencies.sum()
-    )
-    sequencewise_feature_activation_rate = (
-        sequencewise_feature_activation_frequencies / (seq_len - exclude_first_k_tokens)
     )
 
     total_active = global_feature_activation_frequencies.sum().item()
@@ -131,8 +108,6 @@ def compute_feature_statistics(
 
     return GlobalFeatureStatistics(
         feature_activation_rate=feature_activation_rate,
-        tokenwise_feature_activation_rate=tokenwise_feature_activation_rate,
-        sequencewise_feature_activation_rate=sequencewise_feature_activation_rate,
         global_activation_mask=global_feature_activation_mask,
         acc_features=normalized_acc_features,
         total_active_features=total_active,
