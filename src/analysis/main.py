@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 
-from src.analysis.causal import run_layer_pair_evaluation
+from src.analysis.causal import run_layer_pair_evaluation, test_linear_approx
 from src.analysis.plots import (
     PlotConfig,
     plot_all_features_above_threshold_results,
@@ -80,6 +80,21 @@ def main(cfg: DictConfig):
     )
     tokenized = chunk_and_tokenize(dataset, tokenizer, max_seq_len=cfg.sae.seq_len)
 
+    if debug:
+        logger.info("Running test_linear_approx in debug mode...")
+        test_linear_approx(
+            model,  # type: ignore
+            tokenized,
+            sae_weights.feature_encoder_weights,
+            sae_weights.feature_encoder_bias,
+            sae_weights.feature_decoder_weights,
+            j=0,
+            k=1,
+            lam=1e-2,
+            feature_idx=10,
+            test_num_batches=2,
+        )
+
     # Compute statistics for the full dataset
     stats = compute_feature_statistics(
         model,
@@ -128,7 +143,7 @@ def main(cfg: DictConfig):
 
     # Marginalization config flag
     marginalize_across_sequences = cfg.marginalize_across_sequences
-    causal_batch_size = cfg.causal_batch_size
+    apply_to_all_tokens = cfg.apply_to_all_tokens
 
     # Run causal analysis: all_features_above_threshold
     logger.info("Running causal analysis: all_features_above_threshold...")
@@ -141,7 +156,7 @@ def main(cfg: DictConfig):
         num_layers=num_layers,
         marginalization_mode="all_features_above_threshold",
         marginalize_across_sequences=marginalize_across_sequences,
-        num_tokens=causal_batch_size,
+        apply_to_all_tokens=apply_to_all_tokens,
     )
     plot_all_features_above_threshold_results(results_all, num_layers, str(plot_dir))
 
@@ -157,7 +172,7 @@ def main(cfg: DictConfig):
         binned_enc_features=binned_enc_features,
         marginalization_mode="binned_features",
         marginalize_across_sequences=marginalize_across_sequences,
-        num_tokens=causal_batch_size,
+        apply_to_all_tokens=apply_to_all_tokens,
     )
     plot_binned_features_results(results_binned, num_layers, str(plot_dir))
 

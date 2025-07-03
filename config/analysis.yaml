@@ -13,6 +13,8 @@ sae:
   filtering_strategy: acc_features
   filtering_threshold: 1e-3
 
+apply_to_all_tokens: false
+
 test_size: 0.8
 global_max_ds_size: 500
 seed: 42

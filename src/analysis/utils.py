@@ -1,3 +1,4 @@
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -37,6 +38,16 @@ def load_base_model(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, config, tokenizer
 
+def deprecated(message):
+  def deprecated_decorator(func):
+      def deprecated_func(*args, **kwargs):
+          warnings.warn("{} is a deprecated function. {}".format(func.__name__, message),
+                        category=DeprecationWarning,
+                        stacklevel=2)
+          warnings.simplefilter('default', DeprecationWarning)
+          return func(*args, **kwargs)
+      return deprecated_func
+  return deprecated_decorator
 
 def load_sae_from_ckpt(ckpt_path: str, device: str = "cuda") -> SaeWeights:
     sae_ckpt = load_file(ckpt_path, device=device)
