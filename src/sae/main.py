@@ -14,7 +14,10 @@ from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from dotenv import load_dotenv
 from omegaconf import DictConfig, OmegaConf
 from simple_parsing import field
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
+from torch.multiprocessing.spawn import spawn
+from transformers import AutoModel, AutoTokenizer
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils.quantization_config import BitsAndBytesConfig
 
 from src.sae.config import SaeConfig
 from src.sae.data import MemmapDataset, chunk_and_tokenize
@@ -99,7 +102,7 @@ def _resolve_cache_dir():
 def load_artifacts(
     args: RunConfig,
     rank: int | None = None,
-) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+) -> tuple[PreTrainedModel, Dataset | MemmapDataset, Dataset | None]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -150,19 +153,21 @@ def load_artifacts(
             )
             dataset, test_dataset = dataset_.get(args.train_split), dataset_.get("test")
 
+        assert dataset is not None and test_dataset is not None
+
         if "input_ids" not in dataset.column_names:
             tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
             dataset = chunk_and_tokenize(
                 dataset,
                 tokenizer,
                 max_seq_len=args.ctx_len,
-                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count()),
+                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count() or 1),
             )
             test_dataset = chunk_and_tokenize(
                 test_dataset,
                 tokenizer,
                 max_seq_len=args.ctx_len,
-                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count()),
+                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count() or 1),
             )
         else:
             logger.info("Dataset already tokenized; skipping tokenization.")
@@ -202,25 +207,27 @@ def worker_main(
 
     # Awkward hack to prevent other ranks from duplicating data preprocessing
     if not dist.is_initialized() or args.tp or not args.ddp or rank == 0:
-        model, dataset, _ = load_artifacts(args, rank)
+        model, dataset, test_dataset = load_artifacts(args, rank)
 
     if args.ddp and dist.is_initialized():
         dist.barrier()
         if rank != 0:
-            model, dataset, _ = load_artifacts(args, rank)
+            model, dataset, test_dataset = load_artifacts(args, rank)
         dataset = dataset.shard(dist.get_world_size(), rank)
+        if test_dataset is not None:
+            test_dataset = test_dataset.shard(dist.get_world_size(), rank)
 
     total_tokens = len(dataset) * args.ctx_len
 
-    trainer_cls = (
-        SaeTrainer if not args.enable_cross_layer_training else SaeLayerRangeTrainer
-    )
+    if not args.enable_cross_layer_training:
+        trainer = SaeTrainer(args, dataset, test_dataset, model, rank, world_size)  # type: ignore
+    else:
+        trainer = SaeLayerRangeTrainer(args, dataset, model, rank, world_size)  # type: ignore
 
     logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
     logger.info(f"Storing model weights in {model.dtype}")
     logger.info(f"Num tokens in train dataset: {total_tokens:,}")
 
-    trainer = trainer_cls(args, dataset, model, rank, world_size)
     logger.info(f"SAEs: {trainer.saes}")
     trainer.fit()
 
@@ -238,15 +245,15 @@ def main(cfg: DictConfig):
 
     # Convert Hydra config to RunConfig
     parsed_config = OmegaConf.to_container(cfg, resolve=True)
-    sae_config = parsed_config.pop("sae")
-    args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)
+    sae_config = parsed_config.pop("sae")  # type: ignore
+    args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)  # type: ignore
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     args.run_name = f"{args.run_name}_{timestamp}"
 
     if world_size > 1:
         logger.info(f"Spawning {world_size} processes")
-        mp.spawn(
+        spawn(
             worker_main,
             nprocs=world_size,
             args=(world_size, args),

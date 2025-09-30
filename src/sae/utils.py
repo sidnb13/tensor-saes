@@ -2,22 +2,20 @@ import os
 import socket
 from collections import defaultdict
 from functools import partial
-from typing import Any, Type, TypeVar, cast
+from typing import TypeVar, cast
 
 import torch
 from accelerate.utils import send_to_device
 from torch import Tensor, nn
-from torch.distributed._tensor import (
-    Replicate,
-    Shard,
-    distribute_tensor,
-    init_device_mesh,
-)
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor._api import distribute_tensor
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
+    ParallelStyle,
     parallelize_module,
 )
-from transformers import PreTrainedModel
+from torch.distributed.tensor.placement_types import Replicate, Shard
+from transformers.modeling_utils import PreTrainedModel
 
 from .logger import get_logger
 
@@ -63,37 +61,41 @@ def log_parameter_norms(sae, names_str, info):
 
 def configure_tp_model(model, world_size: int):
     tp_mesh = init_device_mesh("cuda", (world_size,))
-    tp_plan = {
-        "encoder": ColwiseParallel(),
-    }
-    model = parallelize_module(model, tp_mesh, tp_plan)
+    tp_plan = {"encoder": ColwiseParallel()}
+    model = parallelize_module(model, tp_mesh, cast(dict[str, ParallelStyle], tp_plan))
 
     # Rowwise parallel sharding
+    w_dec_data = (
+        model.W_dec.data if isinstance(model.W_dec, torch.Tensor) else model.W_dec
+    )
+    if not isinstance(w_dec_data, torch.Tensor):
+        raise TypeError(
+            "model.W_dec must be a Tensor or have a .data attribute that is a Tensor"
+        )
     w_dec_shard = nn.Parameter(
-        distribute_tensor(model.W_dec.data, tp_mesh, placements=[Shard(0)])
+        distribute_tensor(w_dec_data, tp_mesh, placements=[Shard(0)])
     )
     model.register_parameter("W_dec", w_dec_shard)
+    b_dec_data = (
+        model.b_dec.data if isinstance(model.b_dec, torch.Tensor) else model.b_dec
+    )
+    if not isinstance(b_dec_data, torch.Tensor):
+        raise TypeError(
+            "model.b_dec must be a Tensor or have a .data attribute that is a Tensor"
+        )
     b_dec_repl = nn.Parameter(
-        distribute_tensor(model.b_dec.data, tp_mesh, placements=[Replicate()])
+        distribute_tensor(b_dec_data, tp_mesh, placements=[Replicate()])
     )
     model.register_parameter("b_dec", b_dec_repl)
-
-    from torch.distributed._tensor import DTensor
-
-    print("Encoder weight", DTensor.to_local(model.encoder.weight).shape)
-    print("W_dec", DTensor.to_local(model.W_dec).shape)
-
-    model.tp_mesh = tp_mesh
 
     return model
 
 
-def assert_type(typ: Type[T], obj: Any) -> T:
+def assert_type(typ, obj):
     """Assert that an object is of a given type at runtime and return it."""
     if not isinstance(obj, typ):
         raise TypeError(f"Expected {typ.__name__}, got {type(obj).__name__}")
-
-    return cast(typ, obj)
+    return obj  # Avoid using cast with variable type
 
 
 @torch.no_grad()
@@ -233,4 +235,7 @@ def move_batch_to_device(batch: dict, device: torch.device | str) -> dict:
     Move all tensors in a batch dictionary to the specified device.
     Non-tensor values are left unchanged.
     """
-    return {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+    return {
+        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+        for k, v in batch.items()
+    }
