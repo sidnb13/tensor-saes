@@ -68,7 +68,6 @@ def main(cfg: DictConfig):
     dataset = datasets.load_dataset(
         "togethercomputer/RedPajama-Data-1T-Sample",
         split="train",
-        trust_remote_code=True,
     )
     dataset = (
         dataset.train_test_split(test_size=cfg.test_size, seed=cfg.seed)  # type: ignore

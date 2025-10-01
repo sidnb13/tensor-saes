@@ -133,12 +133,11 @@ def load_artifacts(
                 dataset = dataset.get(args.split)
             logger.info(f"Loaded local dataset from {args.dataset}")
         else:
+            # Load dataset from HuggingFace Hub
             dataset = load_dataset(
                 args.dataset,
                 name=args.ds_name,
                 split=args.split,
-                # TODO: Maybe set this to False by default? But RPJ requires it.
-                trust_remote_code=True,
                 cache_dir=_resolve_cache_dir(),
             )
             logger.info(f"Loaded hub dataset from {args.dataset}")

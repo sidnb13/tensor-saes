@@ -215,7 +215,6 @@ def load_dataset_simple(
     tokenizer: PreTrainedTokenizerBase,
     dataset_name: str = "togethercomputer/RedPajama-Data-1T-Sample",
     split: str = "train",
-    trust_remote_code: bool = True,
     test_size: float = 0.8,
     seed: int = 42,
     max_ds_size: int = 1_000,
@@ -230,7 +229,6 @@ def load_dataset_simple(
     dataset = datasets.load_dataset(
         dataset_name,
         split=split,
-        trust_remote_code=trust_remote_code,
     )
     dataset = dataset.train_test_split(test_size=test_size, seed=seed).get("test")  # type: ignore
     dataset = dataset.select(range(max_ds_size))  # type: ignore

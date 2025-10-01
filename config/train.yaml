@@ -8,11 +8,11 @@ defaults:
 
 seed: 42
 model: EleutherAI/pythia-70m
-dataset: togethercomputer/RedPajama-Data-1T-Sample
+dataset: wikitext
 split: train
 train_split: train
 train_test_split: 0.8
-ds_name: null
+ds_name: wikitext-2-raw-v1
 ctx_len: 64
 hf_token: null
 load_in_8bit: false
