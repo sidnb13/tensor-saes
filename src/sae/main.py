@@ -10,7 +10,7 @@ import hydra
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, IterableDataset, load_dataset, load_from_disk
 from dotenv import load_dotenv
 from omegaconf import DictConfig, OmegaConf
 from simple_parsing import field
@@ -19,7 +19,7 @@ from transformers import AutoModel, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.quantization_config import BitsAndBytesConfig
 
-from src.sae.config import SaeConfig
+from src.sae.config import SaeConfig, WandbConfig
 from src.sae.data import MemmapDataset, chunk_and_tokenize
 from src.sae.logger import get_logger
 from src.sae.trainer import SaeLayerRangeTrainer, SaeTrainer, TrainConfig
@@ -55,7 +55,16 @@ class RunConfig(TrainConfig):
     """Fraction of the dataset to use for training."""
 
     ds_name: str | None = None
-    """Dataset name to use when loading from huggingface."""
+    """Dataset configuration/subset name (e.g., 'wikitext-2-raw-v1' for wikitext)."""
+    
+    dataset_config: str | None = None
+    """Alias for ds_name. Dataset configuration/subset to load from HuggingFace."""
+    
+    streaming: bool = False
+    """Enable streaming mode for datasets (avoid downloading entire dataset)."""
+    
+    cache_dir: str | None = None
+    """Custom cache directory for datasets (useful if default location has insufficient space)."""
 
     ctx_len: int = 2048
     """Context length to use for training."""
@@ -66,8 +75,8 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
-    max_train_examples: int = -1
-    """Maximum number of examples to use for training."""
+    max_train_tokens: int = -1
+    """Maximum number of tokens to use for training. Set to -1 for unlimited."""
 
     max_test_examples: int = -1
     """Maximum number of examples to use for testing."""
@@ -103,28 +112,45 @@ def load_artifacts(
     args: RunConfig,
     rank: int | None = None,
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset, Dataset | None]:
+    # Determine the actual device index to use
+    if rank is not None and torch.cuda.is_available():
+        # Use rank modulo the number of available devices
+        device_id = rank % torch.cuda.device_count()
+        torch.cuda.set_device(device_id)
+    else:
+        device_id = None
+    
     if args.load_in_8bit:
         dtype = torch.float16
-    elif torch.cuda.is_bf16_supported():
+    elif torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         dtype = torch.bfloat16
     else:
         dtype = "auto"
 
     model = AutoModel.from_pretrained(
         args.model,
-        device_map={"": f"cuda:{rank}"} if rank is not None else "auto",
+        device_map={"": f"cuda:{device_id}"} if device_id is not None else "auto",
         quantization_config=(
             BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
             if args.load_in_8bit
             else None
         ),
-        torch_dtype=dtype,
+        dtype=dtype,
         token=args.hf_token,
     )
 
+    # Determine dataset config/subset name (prefer dataset_config, fallback to ds_name)
+    dataset_subset = args.dataset_config or args.ds_name
+    
+    # Determine cache directory
+    cache_directory = args.cache_dir if args.cache_dir else _resolve_cache_dir()
+    
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):
-        dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_train_examples)
+        # Convert token limit to example limit if needed
+        max_examples = args.max_train_tokens // args.ctx_len if args.max_train_tokens > 0 else -1
+        dataset = MemmapDataset(args.dataset, args.ctx_len, max_examples)
+        logger.info(f"Loaded memmap dataset from {args.dataset}")
     else:
         # For Huggingface datasets
         if os.path.exists(args.dataset):
@@ -136,50 +162,83 @@ def load_artifacts(
             # Load dataset from HuggingFace Hub
             dataset = load_dataset(
                 args.dataset,
-                name=args.ds_name,
+                name=dataset_subset,
                 split=args.split,
-                cache_dir=_resolve_cache_dir(),
+                cache_dir=cache_directory,
+                streaming=args.streaming,
             )
-            logger.info(f"Loaded hub dataset from {args.dataset}")
+            if args.streaming:
+                logger.info(f"Loaded hub dataset '{args.dataset}' in streaming mode (config: '{dataset_subset or 'default'}')")
+            elif dataset_subset:
+                logger.info(f"Loaded hub dataset '{args.dataset}' (config: '{dataset_subset}')")
+            else:
+                logger.info(f"Loaded hub dataset '{args.dataset}'")
 
-        assert isinstance(dataset, Dataset)
-
-        # create train-test split
-        if args.train_test_split > 0:
-            dataset_ = dataset.train_test_split(
-                test_size=args.train_test_split,
-                seed=args.seed,
-            )
-            dataset, test_dataset = dataset_.get(args.train_split), dataset_.get("test")
-
-        assert dataset is not None and test_dataset is not None
-
-        if "input_ids" not in dataset.column_names:
-            tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-            dataset = chunk_and_tokenize(
-                dataset,
-                tokenizer,
-                max_seq_len=args.ctx_len,
-                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count() or 1),
-            )
-            test_dataset = chunk_and_tokenize(
-                test_dataset,
-                tokenizer,
-                max_seq_len=args.ctx_len,
-                num_proc=min(args.data_preprocessing_num_proc, os.cpu_count() or 1),
-            )
+        # Handle streaming vs regular datasets differently
+        if args.streaming:
+            # For streaming datasets, we can't do train_test_split
+            # Users should specify the split they want directly
+            test_dataset = None
+            logger.info("Streaming mode: train_test_split disabled. Use 'split' parameter to select data split.")
         else:
-            logger.info("Dataset already tokenized; skipping tokenization.")
+            assert isinstance(dataset, Dataset)
 
-        dataset, test_dataset = (
-            dataset.with_format("torch"),
-            test_dataset.with_format("torch"),
-        )
+            # create train-test split
+            if args.train_test_split > 0:
+                dataset_ = dataset.train_test_split(
+                    test_size=args.train_test_split,
+                    seed=args.seed,
+                )
+                dataset, test_dataset = dataset_.get(args.train_split), dataset_.get("test")
 
-        if (limit := args.max_train_examples) and args.max_train_examples > 0:
-            dataset = dataset.select(range(limit))
-        if (limit := args.max_test_examples) and args.max_test_examples > 0:
-            test_dataset = test_dataset.select(range(limit))
+            assert dataset is not None and test_dataset is not None
+
+        # Tokenization
+        if not args.streaming:
+            if "input_ids" not in dataset.column_names:
+                tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
+                dataset = chunk_and_tokenize(
+                    dataset,
+                    tokenizer,
+                    max_seq_len=args.ctx_len,
+                    num_proc=min(args.data_preprocessing_num_proc, os.cpu_count() or 1),
+                )
+                if test_dataset is not None:
+                    test_dataset = chunk_and_tokenize(
+                        test_dataset,
+                        tokenizer,
+                        max_seq_len=args.ctx_len,
+                        num_proc=min(args.data_preprocessing_num_proc, os.cpu_count() or 1),
+                    )
+            else:
+                logger.info("Dataset already tokenized; skipping tokenization.")
+
+            dataset = dataset.with_format("torch")
+            if test_dataset is not None:
+                test_dataset = test_dataset.with_format("torch")
+
+            # Limit dataset by tokens if specified
+            if args.max_train_tokens > 0:
+                # Calculate approximate number of examples needed
+                limit = args.max_train_tokens // args.ctx_len
+                dataset = dataset.select(range(min(limit, len(dataset))))
+                logger.info(f"Limited training dataset to ~{limit} examples (~{args.max_train_tokens:,} tokens)")
+            if test_dataset is not None and (limit := args.max_test_examples) and args.max_test_examples > 0:
+                test_dataset = test_dataset.select(range(limit))
+        else:
+            # For streaming datasets, apply tokenization on-the-fly
+            if "input_ids" not in list(dataset.features.keys()):
+                tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
+                logger.info("Applying tokenization to streaming dataset (on-the-fly)")
+                dataset = chunk_and_tokenize(
+                    dataset,
+                    tokenizer,
+                    max_seq_len=args.ctx_len,
+                )
+            else:
+                logger.info("Dataset already tokenized; skipping tokenization.")
+            
+            # For streaming datasets, training loop will handle token limit
 
     return model, dataset, test_dataset
 
@@ -190,11 +249,20 @@ def worker_main(
     args: RunConfig,
 ):
     if args.ddp and world_size > 1:
-        torch.cuda.set_device(rank)
+        # Set CUDA device for this process
+        device_id = None
+        if torch.cuda.is_available():
+            device_id = rank % torch.cuda.device_count()
+            torch.cuda.set_device(device_id)
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(args.port)
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
-        dist.init_process_group("nccl", world_size=world_size, rank=rank)
+        # Initialize process group with explicit device_id to avoid warnings
+        dist.init_process_group(
+            "nccl",
+            world_size=world_size,
+            rank=rank,
+            device_id=torch.device(f"cuda:{device_id}") if device_id is not None else None,
+        )
 
         if rank == 0:
             logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
@@ -212,20 +280,27 @@ def worker_main(
         dist.barrier()
         if rank != 0:
             model, dataset, test_dataset = load_artifacts(args, rank)
-        dataset = dataset.shard(dist.get_world_size(), rank)
-        if test_dataset is not None:
-            test_dataset = test_dataset.shard(dist.get_world_size(), rank)
+        # Skip sharding for streaming datasets
+        if not isinstance(dataset, IterableDataset):
+            dataset = dataset.shard(dist.get_world_size(), rank)
+            if test_dataset is not None:
+                test_dataset = test_dataset.shard(dist.get_world_size(), rank)
 
-    total_tokens = len(dataset) * args.ctx_len
+    # Calculate total tokens (skip for streaming datasets)
+    if isinstance(dataset, IterableDataset):
+        logger.info(f"Training on '{args.dataset}' (split '{args.split}') in streaming mode")
+        logger.info(f"Storing model weights in {model.dtype}")
+        logger.info("Streaming mode: dataset size unknown")
+    else:
+        total_tokens = len(dataset) * args.ctx_len
+        logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
+        logger.info(f"Storing model weights in {model.dtype}")
+        logger.info(f"Num tokens in train dataset: {total_tokens:,}")
 
     if not args.enable_cross_layer_training:
         trainer = SaeTrainer(args, dataset, test_dataset, model, rank, world_size)  # type: ignore
     else:
         trainer = SaeLayerRangeTrainer(args, dataset, model, rank, world_size)  # type: ignore
-
-    logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
-    logger.info(f"Storing model weights in {model.dtype}")
-    logger.info(f"Num tokens in train dataset: {total_tokens:,}")
 
     logger.info(f"SAEs: {trainer.saes}")
     trainer.fit()
@@ -245,10 +320,18 @@ def main(cfg: DictConfig):
     # Convert Hydra config to RunConfig
     parsed_config = OmegaConf.to_container(cfg, resolve=True)
     sae_config = parsed_config.pop("sae")  # type: ignore
-    args = RunConfig(sae=SaeConfig(**sae_config), **parsed_config)  # type: ignore
+    wandb_config = parsed_config.pop("wandb")  # type: ignore
+    args = RunConfig(
+        sae=SaeConfig(**sae_config),
+        wandb=WandbConfig(**wandb_config),
+        **parsed_config
+    )  # type: ignore
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    args.run_name = f"{args.run_name}_{timestamp}"
+    if args.run_name:
+        args.run_name = f"{args.run_name}_{timestamp}"
+    else:
+        args.run_name = timestamp
 
     if world_size > 1:
         logger.info(f"Spawning {world_size} processes")

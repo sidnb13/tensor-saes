@@ -1,22 +1,33 @@
 defaults:
   - _self_
-  - experiment: null
-  - launcher: null
   - logging: colorlog
   - override hydra/job_logging: colorlog
   - override hydra/hydra_logging: colorlog
+  - override /hydra/launcher: ray_jobs
+
+hydra:
+  launcher:
+    _target_: hydra_plugins.hydra_ray_jobs_launcher.ray_jobs_launcher.RayJobsLauncher
+    poll_jobs: false
+    entrypoint_num_gpus: 1
+    enable_gpu_blocking: true
+    entrypoint_resources:
+      tensor-saes-scaling_strategies: 1
 
 seed: 42
 model: EleutherAI/pythia-70m
-dataset: wikitext
+dataset: HuggingFaceFW/fineweb
 split: train
 train_split: train
 train_test_split: 0.8
-ds_name: wikitext-2-raw-v1
+ds_name: sample-10BT  # Dataset configuration/subset name (legacy parameter)
+dataset_config: sample-10BT  # Use sample-10BT subset
+streaming: true  # Enable streaming mode
+cache_dir: null  # Custom cache directory (set if default location has insufficient space)
 ctx_len: 64
 hf_token: null
 load_in_8bit: false
-max_train_examples: -1
+max_train_tokens: 1_000_000_000
 max_test_examples: -1
 data_preprocessing_num_proc: 48
 
@@ -54,8 +65,16 @@ distribute_modules: false
 save_every: 1000
 root_path: checkpoints
 stdout_log_frequency: 10
-
-log_to_wandb: true
 run_name: null
-wandb_group: null
-wandb_log_frequency: 1
+
+# Wandb configuration
+wandb:
+  log: ${oc.env:WANDB_LOG,true}
+  project: ${oc.env:WANDB_PROJECT,sae}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  run_name: ${oc.env:WANDB_RUN_NAME,null}
+  run_id: ${oc.env:WANDB_RUN_ID,null}
+  group: ${oc.env:WANDB_GROUP,null}
+  tags: ${oc.env:WANDB_TAGS,null}
+  notes: ${oc.env:WANDB_NOTES,null}
+  log_frequency: 1

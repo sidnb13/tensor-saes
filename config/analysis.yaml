@@ -1,8 +1,18 @@
 defaults:
   - _self_
-  - experiment: null
-  - launcher: null
   - logging: colorlog
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+  - override /hydra/launcher: ray_jobs
+
+hydra:
+  launcher:
+    _target_: hydra_plugins.hydra_ray_jobs_launcher.ray_jobs_launcher.RayJobsLauncher
+    poll_jobs: false
+    entrypoint_num_gpus: 1
+    enable_gpu_blocking: true
+    entrypoint_resources:
+      tensor-saes-scaling_strategies: 1
 
 # Some default debug params
 sae:

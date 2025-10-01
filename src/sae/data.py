@@ -5,11 +5,11 @@ from typing import TypeVar, Union
 
 import numpy as np
 import torch
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, IterableDataset
 from torch.utils.data import Dataset as TorchDataset
 from transformers import PreTrainedTokenizerBase
 
-T = TypeVar("T", bound=Union[Dataset, DatasetDict])
+T = TypeVar("T", bound=Union[Dataset, DatasetDict, IterableDataset])
 
 
 def chunk_and_tokenize(
@@ -86,22 +86,32 @@ def chunk_and_tokenize(
 
         return output
 
-    data = data.map(
-        _tokenize_fn,
-        # Batching is important for ensuring that we don't waste tokens
-        # since we always throw away the last element of the batch we
-        # want to keep the batch size as large as possible
-        batched=True,
-        batch_size=batch_size,
-        num_proc=num_proc,
-        remove_columns=get_columns_all_equal(data),
-        load_from_cache_file=load_from_cache_file,
-        desc="Chunking and tokenizing",
-    )
-    return data.with_format(format, columns=["input_ids"])
+    # IterableDataset.map() doesn't support num_proc and load_from_cache_file
+    is_iterable = isinstance(data, IterableDataset)
+    
+    map_kwargs = {
+        "batched": True,
+        "batch_size": batch_size,
+        "remove_columns": get_columns_all_equal(data),
+    }
+    
+    # Only add these parameters for non-streaming datasets
+    if not is_iterable:
+        map_kwargs["num_proc"] = num_proc
+        map_kwargs["load_from_cache_file"] = load_from_cache_file
+        map_kwargs["desc"] = "Chunking and tokenizing"
+    
+    data = data.map(_tokenize_fn, **map_kwargs)
+    
+    # IterableDataset doesn't support with_format in the same way
+    if not is_iterable:
+        return data.with_format(format, columns=["input_ids"])
+    else:
+        # For streaming datasets, just return as is (it will yield dicts with input_ids)
+        return data
 
 
-def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
+def get_columns_all_equal(dataset: Union[Dataset, DatasetDict, IterableDataset]) -> list[str]:
     """Get a single list of columns in a `Dataset` or `DatasetDict`.
 
     We assert the columms are the same across splits if it's a `DatasetDict`.
@@ -119,6 +129,10 @@ def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
             raise ValueError("All splits must have the same columns")
 
         return columns
+    
+    if isinstance(dataset, IterableDataset):
+        # IterableDataset uses features instead of column_names
+        return list(dataset.features.keys())
 
     return dataset.column_names
 

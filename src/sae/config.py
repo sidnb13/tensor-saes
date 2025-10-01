@@ -37,8 +37,41 @@ class SaeConfig(Serializable):
 
 
 @dataclass
+class WandbConfig(Serializable):
+    """Configuration for Weights & Biases logging."""
+    
+    log: bool = True
+    """Whether to log to Weights & Biases."""
+    
+    project: str = "sae"
+    """Wandb project name."""
+    
+    entity: str | None = None
+    """Wandb entity name."""
+    
+    run_name: str | None = None
+    """Wandb run name."""
+    
+    run_id: str | None = None
+    """Wandb run ID for resuming runs."""
+    
+    group: str | None = None
+    """Wandb group name for grouping runs."""
+    
+    tags: str | None = None
+    """Comma-separated tags for the run."""
+    
+    notes: str | None = None
+    """Notes for the run."""
+    
+    log_frequency: int = 1
+    """Frequency of logging to wandb."""
+
+
+@dataclass
 class TrainConfig(Serializable):
     sae: SaeConfig
+    wandb: WandbConfig
 
     batch_size: int = 8
     """Batch size measured in sequences."""
@@ -93,10 +126,9 @@ class TrainConfig(Serializable):
     root_path: str = "checkpoints"
     """Root path to save checkpoints to."""
 
-    log_to_wandb: bool = True
-    wandb_group: str | None = None
     run_name: str | None = None
-    wandb_log_frequency: int = 1
+    """Run name (used for general purposes and as fallback for wandb)."""
+    
     stdout_log_frequency: int = 10
 
     def __post_init__(self):

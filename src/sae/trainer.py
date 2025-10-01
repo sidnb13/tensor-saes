@@ -6,6 +6,7 @@ from fnmatch import fnmatchcase
 
 import torch
 import torch.distributed as dist
+from datasets import IterableDataset
 from natsort import natsorted
 from safetensors.torch import save_file
 from torch import Tensor, nn
@@ -30,6 +31,25 @@ from .utils import (
 )
 
 logger = get_logger(__name__)
+
+
+def collate_fn(batch):
+    """Collate function to handle both regular and streaming datasets."""
+    if not batch:
+        return {}
+    
+    # Check if we need to convert lists to tensors
+    first_item = batch[0]
+    if isinstance(first_item.get("input_ids"), list):
+        # Convert lists to tensors
+        return {
+            "input_ids": torch.tensor([item["input_ids"] for item in batch], dtype=torch.long)
+        }
+    else:
+        # Already tensors, use default collation
+        return {
+            "input_ids": torch.stack([item["input_ids"] for item in batch])
+        }
 
 
 class SaeTrainer:
@@ -69,8 +89,21 @@ class SaeTrainer:
         self.distribute_modules()
 
         N = len(cfg.hookpoints)
-        assert isinstance(train_dataset, Sized)
-        num_examples = len(train_dataset)
+        
+        # Calculate num_training_steps based on tokens
+        tokens_per_batch = cfg.batch_size * cfg.ctx_len * cfg.micro_acc_steps
+        if cfg.max_train_tokens > 0:
+            num_training_steps = cfg.max_train_tokens // tokens_per_batch
+            logger.info(f"Training for {num_training_steps:,} steps (~{cfg.max_train_tokens:,} tokens)")
+        elif isinstance(train_dataset, Sized):
+            # Calculate from dataset size
+            num_examples = len(train_dataset)
+            num_training_steps = num_examples // (cfg.batch_size * cfg.micro_acc_steps)
+            logger.info(f"Training for {num_training_steps:,} steps ({num_examples:,} examples)")
+        else:
+            # For streaming datasets without token limit, use a large default
+            num_training_steps = 1_000_000
+            logger.info(f"Streaming dataset without token limit: using {num_training_steps:,} as estimated training steps for LR scheduling")
 
         device = model.device
         input_widths = resolve_widths(model, cfg.hookpoints)
@@ -122,7 +155,7 @@ class SaeTrainer:
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             cfg.lr_warmup_steps,
-            num_examples // (cfg.batch_size * cfg.micro_acc_steps),
+            num_training_steps,
         )
 
     def fit(self):
@@ -132,20 +165,30 @@ class SaeTrainer:
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = dist.is_initialized() and not self.cfg.distribute_modules
 
-        if self.cfg.log_to_wandb and rank_zero:
+        if self.cfg.wandb.log and rank_zero:
             try:
                 import wandb
+                
+                # Parse tags if provided as comma-separated string
+                tags = None
+                if self.cfg.wandb.tags:
+                    tags = [t.strip() for t in self.cfg.wandb.tags.split(",")]
 
                 wandb.init(
-                    name=self.cfg.run_name,
-                    project="sae",
+                    name=self.cfg.wandb.run_name or self.cfg.run_name,
+                    project=self.cfg.wandb.project,
+                    entity=self.cfg.wandb.entity,
+                    id=self.cfg.wandb.run_id,
+                    group=self.cfg.wandb.group,
+                    tags=tags,
+                    notes=self.cfg.wandb.notes,
                     config=asdict(self.cfg),
-                    group=self.cfg.wandb_group,
                     save_code=True,
+                    resume="allow" if self.cfg.wandb.run_id else None,
                 )
             except ImportError:
                 logger.info("Weights & Biases not installed, skipping logging.")
-                self.cfg.log_to_wandb = False
+                self.cfg.wandb.log = False
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
@@ -155,10 +198,13 @@ class SaeTrainer:
         logger.info(f"Number of model parameters: {num_model_params:_}")
 
         device = self.model.device
+        # IterableDataset doesn't support shuffle
+        should_shuffle = not isinstance(self.train_dataset, IterableDataset)
         dl = DataLoader(
             self.train_dataset,
             batch_size=self.cfg.batch_size,
-            shuffle=True,
+            shuffle=should_shuffle,
+            collate_fn=collate_fn,
         )
         pbar = tqdm(dl, desc="Training", disable=not rank_zero)
 
@@ -171,6 +217,7 @@ class SaeTrainer:
             for name, sae in self.saes.items()
         }
         num_tokens_in_step = 0
+        total_tokens_seen = 0  # Cumulative token counter
 
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
@@ -192,6 +239,11 @@ class SaeTrainer:
             hidden_dict[name] = outputs.flatten(0, 1)
 
         for i, batch in enumerate(pbar):
+            # Check if we've reached the token limit
+            if self.cfg.max_train_tokens > 0 and total_tokens_seen >= self.cfg.max_train_tokens:
+                logger.info(f"Reached token limit of {self.cfg.max_train_tokens:,} tokens. Stopping training.")
+                break
+            
             hidden_dict.clear()
 
             # Bookkeeping for dead feature detection
@@ -259,6 +311,7 @@ class SaeTrainer:
                         test_loader = DataLoader(
                             self.test_dataset,
                             batch_size=self.cfg.batch_size,
+                            collate_fn=collate_fn,
                         )
 
                         hidden_sum = torch.zeros_like(total_variance)
@@ -339,7 +392,7 @@ class SaeTrainer:
                     raw.scale_encoder_k()
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
-                denom = acc_steps * self.cfg.wandb_log_frequency
+                denom = acc_steps * self.cfg.wandb.log_frequency
                 wrapped = maybe_wrapped[name]
 
                 # Save memory by chunking the activations
@@ -397,6 +450,9 @@ class SaeTrainer:
                         counts += num_tokens_in_step
                         counts[did_fire[name]] = 0
 
+                    # Update cumulative token count
+                    total_tokens_seen += num_tokens_in_step
+                    
                     # Reset stats for this step
                     num_tokens_in_step = 0
                     for mask in did_fire.values():
@@ -421,6 +477,7 @@ class SaeTrainer:
                             f"lr/{names_str}": self.optimizer.param_groups[-1]["lr"],
                             f"grad_norm/{names_str}": grad_norms[names],
                             "step": step,
+                            "counters/tokens": total_tokens_seen,
                         },
                     )
 
@@ -436,7 +493,7 @@ class SaeTrainer:
 
                 if (step + 1) % min(
                     self.cfg.stdout_log_frequency,
-                    self.cfg.wandb_log_frequency,
+                    self.cfg.wandb.log_frequency,
                 ) == 0 and rank_zero:
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
@@ -444,10 +501,11 @@ class SaeTrainer:
 
                 if (step + 1) % self.cfg.stdout_log_frequency == 0 and rank_zero:
                     logger.info(info)
+                    pbar.set_postfix({"tokens": f"{total_tokens_seen:,}"})
 
                 if (
-                    self.cfg.log_to_wandb
-                    and (step + 1) % self.cfg.wandb_log_frequency == 0
+                    self.cfg.wandb.log
+                    and (step + 1) % self.cfg.wandb.log_frequency == 0
                 ):
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
@@ -460,7 +518,7 @@ class SaeTrainer:
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save(step)
 
-        if rank_zero and self.cfg.log_to_wandb:
+        if rank_zero and self.cfg.wandb.log:
             wandb.finish()
 
         self.save(step)
@@ -631,8 +689,20 @@ class SaeLayerRangeTrainer(SaeTrainer):
         self.dataset = dataset
         self.distribute_modules()
 
-        assert isinstance(dataset, Sized)
-        num_examples = len(dataset)
+        # Calculate num_training_steps based on tokens
+        tokens_per_batch = cfg.batch_size * cfg.ctx_len
+        if cfg.max_train_tokens > 0:
+            num_training_steps = cfg.max_train_tokens // tokens_per_batch
+            logger.info(f"Training for {num_training_steps:,} steps (~{cfg.max_train_tokens:,} tokens)")
+        elif isinstance(dataset, Sized):
+            # Calculate from dataset size
+            num_examples = len(dataset)
+            num_training_steps = num_examples // cfg.batch_size
+            logger.info(f"Training for {num_training_steps:,} steps ({num_examples:,} examples)")
+        else:
+            # For streaming datasets without token limit, use a large default
+            num_training_steps = 1_000_000
+            logger.info(f"Streaming dataset without token limit: using {num_training_steps:,} as estimated training steps for LR scheduling")
 
         device = model.device
         input_widths = resolve_widths_rangewise(model, cfg.hookpoints)  # type: ignore
@@ -704,7 +774,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             cfg.lr_warmup_steps,
-            num_examples // cfg.batch_size,
+            num_training_steps,
         )
 
     def fit(self):
@@ -714,20 +784,30 @@ class SaeLayerRangeTrainer(SaeTrainer):
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = self.cfg.ddp and dist.is_initialized() and not self.cfg.distribute_modules
 
-        if self.cfg.log_to_wandb and rank_zero:
+        if self.cfg.wandb.log and rank_zero:
             try:
                 import wandb
+                
+                # Parse tags if provided as comma-separated string
+                tags = None
+                if self.cfg.wandb.tags:
+                    tags = [t.strip() for t in self.cfg.wandb.tags.split(",")]
 
                 wandb.init(
-                    name=self.cfg.run_name,
-                    project="sae",
+                    name=self.cfg.wandb.run_name or self.cfg.run_name,
+                    project=self.cfg.wandb.project,
+                    entity=self.cfg.wandb.entity,
+                    id=self.cfg.wandb.run_id,
+                    group=self.cfg.wandb.group,
+                    tags=tags,
+                    notes=self.cfg.wandb.notes,
                     config=asdict(self.cfg),
-                    group=self.cfg.wandb_group,
                     save_code=True,
+                    resume="allow" if self.cfg.wandb.run_id else None,
                 )
             except ImportError:
                 logger.info("Weights & Biases not installed, skipping logging.")
-                self.cfg.log_to_wandb = False
+                self.cfg.wandb.log = False
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
@@ -737,10 +817,13 @@ class SaeLayerRangeTrainer(SaeTrainer):
         logger.info(f"Number of model parameters: {num_model_params:_}")
 
         device = self.model.device
+        # IterableDataset doesn't support shuffle
+        should_shuffle = not isinstance(self.dataset, IterableDataset)
         dl = DataLoader(
             self.dataset,
             batch_size=self.cfg.batch_size,
-            shuffle=True,
+            shuffle=should_shuffle,
+            collate_fn=collate_fn,
         )
         pbar = tqdm(dl, desc="Training", disable=not rank_zero)
 
@@ -753,6 +836,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
             for name, sae in self.saes.items()
         }
         num_tokens_in_step = 0
+        total_tokens_seen = 0  # Cumulative token counter
 
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
@@ -781,6 +865,11 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 hidden_dict[key].append(outputs.flatten(0, 1))  # type: ignore
 
         for i, batch in enumerate(pbar):
+            # Check if we've reached the token limit
+            if self.cfg.max_train_tokens > 0 and total_tokens_seen >= self.cfg.max_train_tokens:
+                logger.info(f"Reached token limit of {self.cfg.max_train_tokens:,} tokens. Stopping training.")
+                break
+            
             hidden_dict = defaultdict(list)
 
             # Bookkeeping for dead feature detection
@@ -854,6 +943,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                             test_loader = DataLoader(
                                 self.test_dataset,
                                 batch_size=self.cfg.batch_size,
+                                collate_fn=collate_fn,
                             )
 
                             hidden_sum = torch.zeros_like(total_variance)
@@ -951,7 +1041,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                     raw.set_decoder_norm_to_unit_norm()  # type: ignore
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
-                denom = acc_steps * self.cfg.wandb_log_frequency
+                denom = acc_steps * self.cfg.wandb.log_frequency
                 wrapped = maybe_wrapped[names]
 
                 if self.cfg.tp:
@@ -1016,6 +1106,9 @@ class SaeLayerRangeTrainer(SaeTrainer):
                         counts += num_tokens_in_step
                         counts[did_fire[names]] = 0
 
+                    # Update cumulative token count
+                    total_tokens_seen += num_tokens_in_step
+                    
                     # Reset stats for this step
                     num_tokens_in_step = 0
                     for mask in did_fire.values():
@@ -1040,6 +1133,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                             f"lr/{names_str}": self.optimizer.param_groups[-1]["lr"],
                             f"grad_norm/{names_str}": grad_norms[names],
                             "step": step,
+                            "counters/tokens": total_tokens_seen,
                         },
                     )
 
@@ -1055,7 +1149,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                 if (step + 1) % min(
                     self.cfg.stdout_log_frequency,
-                    self.cfg.wandb_log_frequency,
+                    self.cfg.wandb.log_frequency,
                 ) == 0 and rank_zero:
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
@@ -1063,10 +1157,11 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
                 if (step + 1) % self.cfg.stdout_log_frequency == 0 and rank_zero:
                     logger.info(info)
+                    pbar.set_postfix({"tokens": f"{total_tokens_seen:,}"})
 
                 if (
-                    self.cfg.log_to_wandb
-                    and (step + 1) % self.cfg.wandb_log_frequency == 0
+                    self.cfg.wandb.log
+                    and (step + 1) % self.cfg.wandb.log_frequency == 0
                 ):
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
@@ -1079,7 +1174,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save(step)
 
-        if rank_zero and self.cfg.log_to_wandb:
+        if rank_zero and self.cfg.wandb.log:
             wandb.finish()
 
         self.save(step)
