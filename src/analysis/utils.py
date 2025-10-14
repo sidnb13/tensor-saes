@@ -38,16 +38,22 @@ def load_base_model(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, config, tokenizer
 
+
 def deprecated(message):
-  def deprecated_decorator(func):
-      def deprecated_func(*args, **kwargs):
-          warnings.warn("{} is a deprecated function. {}".format(func.__name__, message),
-                        category=DeprecationWarning,
-                        stacklevel=2)
-          warnings.simplefilter('default', DeprecationWarning)
-          return func(*args, **kwargs)
-      return deprecated_func
-  return deprecated_decorator
+    def deprecated_decorator(func):
+        def deprecated_func(*args, **kwargs):
+            warnings.warn(
+                "{} is a deprecated function. {}".format(func.__name__, message),
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+            warnings.simplefilter("default", DeprecationWarning)
+            return func(*args, **kwargs)
+
+        return deprecated_func
+
+    return deprecated_decorator
+
 
 def load_sae_from_ckpt(ckpt_path: str, device: str = "cuda") -> SaeWeights:
     sae_ckpt = load_file(ckpt_path, device=device)
@@ -101,22 +107,19 @@ def filter_inactive_features(
     filtered_feature_decoder_weights = sae_weights.feature_decoder_weights[
         active_features
     ]
-    filtered_feature_decoder_bias = (
-        sae_weights.feature_decoder_bias[active_features]
-        if sae_weights.feature_decoder_bias is not None
-        else None
-    )
 
     filtered_sae_weights = SaeWeights(
         feature_encoder_weights=filtered_feature_encoder_weights,
         feature_encoder_bias=filtered_feature_encoder_bias,
         feature_decoder_weights=filtered_feature_decoder_weights,
-        feature_decoder_bias=filtered_feature_decoder_bias,  # type: ignore
+        feature_decoder_bias=sae_weights.feature_decoder_bias,  # type: ignore
     )
 
     filtered_stats = GlobalFeatureStatistics(
         feature_activation_rate=stats.feature_activation_rate[active_features.cpu()],
-        global_activation_mask=stats.global_activation_mask[active_features.cpu()],
+        global_activation_mask=stats.global_activation_mask.index_select(
+            -1, active_features.cpu()
+        ),
         acc_features=stats.acc_features[active_features.cpu()],
         total_active_features=stats.total_active_features,
         avg_active_features_per_token=stats.avg_active_features_per_token,

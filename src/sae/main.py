@@ -247,6 +247,7 @@ def worker_main(
     rank: int,
     world_size: int,
     args: RunConfig,
+    original_cfg: DictConfig,
 ):
     if args.ddp and world_size > 1:
         # Set CUDA device for this process
@@ -298,9 +299,9 @@ def worker_main(
         logger.info(f"Num tokens in train dataset: {total_tokens:,}")
 
     if not args.enable_cross_layer_training:
-        trainer = SaeTrainer(args, dataset, test_dataset, model, rank, world_size)  # type: ignore
+        trainer = SaeTrainer(args, dataset, test_dataset, model, rank, world_size, original_cfg)  # type: ignore
     else:
-        trainer = SaeLayerRangeTrainer(args, dataset, model, rank, world_size)  # type: ignore
+        trainer = SaeLayerRangeTrainer(args, dataset, model, rank, world_size, original_cfg)  # type: ignore
 
     logger.info(f"SAEs: {trainer.saes}")
     trainer.fit()
@@ -338,10 +339,10 @@ def main(cfg: DictConfig):
         spawn(
             worker_main,
             nprocs=world_size,
-            args=(world_size, args),
+            args=(world_size, args, cfg),
         )
     else:
-        worker_main(0, world_size, args)
+        worker_main(0, world_size, args, cfg)
 
 
 if __name__ == "__main__":

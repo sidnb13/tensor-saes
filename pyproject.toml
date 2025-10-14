@@ -9,7 +9,7 @@ version = "0.1.0"
 
 dependencies = [
     "blobfile",
-    "datasets",
+    "datasets<4.0.0",
     "accelerate",
     "einops",
     "huggingface-hub",

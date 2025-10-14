@@ -17,16 +17,17 @@ hydra:
 # Some default debug params
 sae:
   checkpoint_dir: ./checkpoints/default
+  checkpoint_name: null 
   seq_len: 128
   num_latents: 512
-  model_name: EleutherAI/pythia-14m
+  model_name: EleutherAI/pythia-70m
   filtering_strategy: acc_features
   filtering_threshold: 1e-3
 
 apply_to_all_tokens: false
 
 test_size: 0.8
-global_max_ds_size: 500
+global_max_ds_size: 100
 seed: 42
 test_sequence_index: 0
 marginalize_across_sequences: true

@@ -39,6 +39,7 @@ def compute_feature_statistics(
     global_feature_activation_frequencies = torch.zeros(
         feature_encoder_weights.shape[0], device=model.device
     )
+
     global_feature_activation_mask = torch.zeros(
         len(tokenized),
         seq_len - exclude_first_k_tokens,

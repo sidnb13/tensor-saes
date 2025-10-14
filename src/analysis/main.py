@@ -5,6 +5,7 @@ import datasets
 import hydra
 import numpy as np
 import torch
+import yaml
 from omegaconf import DictConfig
 
 from src.analysis.causal import run_layer_pair_evaluation, test_linear_approx
@@ -37,6 +38,56 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
+def check_model_consistency(checkpoint_dir: Path, analysis_model_name: str):
+    """Check if the model used in analysis matches the one used in training.
+
+    Args:
+        checkpoint_dir: Path to the checkpoint directory
+        analysis_model_name: Model name being used in analysis
+
+    Returns:
+        bool: True if models match or config file doesn't exist, False if they don't match
+    """
+    config_path = checkpoint_dir / "config.yaml"
+
+    if not config_path.exists():
+        logger.warning(
+            f"Training config file not found at {config_path}. Cannot verify model consistency."
+        )
+        return True
+
+    try:
+        with open(config_path, "r") as f:
+            training_config = yaml.safe_load(f)
+
+        # Extract model name from training config
+        training_model_name = training_config.get("sae", {}).get("model_name")
+
+        if training_model_name is None:
+            logger.warning(
+                "Could not find model_name in training config. Cannot verify model consistency."
+            )
+            return True
+
+        if training_model_name != analysis_model_name:
+            logger.error(
+                f"Model mismatch detected! Training used '{training_model_name}' but analysis is using '{analysis_model_name}'. "
+                f"This may lead to incorrect results."
+            )
+            return False
+        else:
+            logger.info(
+                f"Model consistency verified: both training and analysis use '{analysis_model_name}'"
+            )
+            return True
+
+    except Exception as e:
+        logger.warning(
+            f"Error reading training config from {config_path}: {e}. Cannot verify model consistency."
+        )
+        return True
+
+
 @hydra.main(
     version_base=None,
     config_name="analysis",
@@ -49,6 +100,10 @@ def main(cfg: DictConfig):
     plot_dir = checkpoint_dir / "plots"
     plot_dir.mkdir(exist_ok=True, parents=True)
     debug = cfg.debug
+
+    # Check model consistency between training and analysis
+    check_model_consistency(checkpoint_dir, cfg.sae.model_name)
+
     model, config, tokenizer = load_base_model(cfg.sae.model_name, device=cfg.device)
     num_layers = config.num_hidden_layers
 
@@ -60,14 +115,18 @@ def main(cfg: DictConfig):
             device=cfg.device,
         )
     else:
-        logger.info(f"Loading SAE weights and statistics from {checkpoint_dir}")
-        sae_weights = load_sae_from_ckpt(str(checkpoint_dir))
+        checkpoint_name = cfg.sae.checkpoint_name
+        logger.info(
+            f"Loading SAE weights and statistics from {checkpoint_dir / checkpoint_name}"
+        )
+        sae_weights = load_sae_from_ckpt(str(checkpoint_dir / checkpoint_name))
 
     # Load and preprocess the RedPajama dataset as in the notebook
     logger.info("Loading RedPajama dataset and preparing test split...")
     dataset = datasets.load_dataset(
         "togethercomputer/RedPajama-Data-1T-Sample",
         split="train",
+        trust_remote_code=True,
     )
     dataset = (
         dataset.train_test_split(test_size=cfg.test_size, seed=cfg.seed)  # type: ignore

@@ -442,6 +442,112 @@ def test_linear_approx(
 
 
 @torch.no_grad()
+def compute_causal_attribution_strength_batched(
+    j: int,
+    k: int,
+    model: torch.nn.Module,
+    dataset_or_batch: Union[Dict[str, torch.Tensor], Dataset],
+    feature_encoder_weights: torch.Tensor,
+    feature_encoder_bias: torch.Tensor,
+    feature_decoder_weights: torch.Tensor,
+    feature_indices: Optional[Sequence[int]] = None,
+    lambda_value: float = 1.0,
+    exclude_first_k_tokens: int = 0,
+    apply_to_all_tokens: bool = False,
+) -> Dict[int, Dict[str, float]]:
+    """
+    Compute causal attribution strength for multiple features efficiently by reusing clean activations.
+
+    Args:
+        j: Source layer index
+        k: Target layer index
+        model: The language model
+        dataset_or_batch: Input data
+        feature_encoder_weights: SAE encoder weights
+        feature_encoder_bias: SAE encoder bias
+        feature_decoder_weights: SAE decoder weights
+        feature_indices: List of feature indices to evaluate. If None, evaluates all features.
+        lambda_value: Intervention strength (not used in this batched version, kept for compatibility)
+        exclude_first_k_tokens: Number of tokens to exclude from beginning
+        apply_to_all_tokens: Whether to apply intervention to all tokens
+
+    Returns:
+        Dict mapping feature_idx -> {metric: value, ...}
+    """
+    hidden_size = int(model.config.hidden_size)  # type: ignore
+
+    # Default to all features if not specified
+    if feature_indices is None:
+        feature_indices = list(range(feature_encoder_weights.shape[0]))
+
+    # Get clean activations once (no intervention)
+    clean_intervention = perform_intervention(
+        model=model,
+        batch=dataset_or_batch
+        if not isinstance(dataset_or_batch, Dataset)
+        else dataset_or_batch[0:1],
+        intervention_index=j,
+        readout_index=k,
+        feature_encoder_weights=feature_encoder_weights,
+        feature_encoder_bias=feature_encoder_bias,
+        feature_decoder_weights=feature_decoder_weights,
+        lambda_value=0,  # No intervention for clean run
+        feature_idx=0,  # Doesn't matter since lambda=0
+        exclude_first_k_tokens=exclude_first_k_tokens,
+        sae_top_k=128,
+        apply_to_all_tokens=apply_to_all_tokens,
+    )
+
+    results = {}
+
+    # Process each feature using the cached clean activations
+    for idx in feature_indices:
+        # Get decoder vectors for this feature
+        dec_j = feature_decoder_weights[idx, j * hidden_size : (j + 1) * hidden_size]
+        dec_k = feature_decoder_weights[idx, k * hidden_size : (k + 1) * hidden_size]
+
+        # v_j is the direction at layer j
+        v_j = dec_j.unsqueeze(0)  # shape: [1, hidden_size]
+
+        # Compute JVP: how does perturbing layer j in direction v_j affect layer k?
+        jvp = compute_jvp(
+            model,
+            clean_intervention.clean_base_outputs,
+            clean_intervention.input_kwargs,
+            j,
+            k,
+            v_j,
+            sum_over_tokens=False,
+        )
+
+        # v_k is the expected direction at layer k
+        v_k = dec_k.unsqueeze(0)  # shape: [1, hidden_size]
+        v_k_norm_squared = torch.norm(v_k, p=2, dim=-1).pow(2)
+
+        # Compute metrics
+        proportion_explained = torch.einsum("bse,be->bs", jvp, v_k) / v_k_norm_squared
+
+        causal_cosine = F.cosine_similarity(
+            jvp,
+            v_k.unsqueeze(0).unsqueeze(1),
+            dim=-1,
+        ).squeeze()
+
+        self_cosine_sim = F.cosine_similarity(
+            dec_j.unsqueeze(0), dec_k.unsqueeze(0)
+        ).item()
+
+        # Store results for this feature
+        results[idx] = {
+            "causality": proportion_explained.mean().item(),
+            "causal_cosine": causal_cosine.mean().item(),
+            "self_cosine_similarity": self_cosine_sim,
+        }
+
+    return results
+
+
+@torch.no_grad()
 def compute_causal_attribution_strength(
     j: int,
     k: int,
@@ -577,118 +683,61 @@ def _eval_all_features_above_threshold(
 ):
     """
     If marginalize_across_sequences is True, aggregate results over the full dataset. Otherwise, use only the provided single example.
+    Batches over features for a given (i, j) layer pair to reduce redundant model forward passes.
     """
     results = {layer: {} for layer in range(num_layers)}
-    hidden_size = int(model.config.hidden_size)  # type: ignore
-    # Flatten the cartesian product of (i, j, feature_idx)
-    cartesian = [
-        (i, j, idx)
-        for i in range(num_layers)
-        for j in range(i + 1, num_layers)
-        for idx in range(feature_encoder_weights.shape[0])
-    ]
-    pbar = tqdm(cartesian, desc="Layer/Feature pairs", leave=True)
-    for i, j, idx in pbar:
-        pbar.set_postfix({"i": i, "j": j, "feature": idx})
-        layer_results = results[i].setdefault(
-            (i, j),
-            {
-                "causality": [],
-                "causal_cosines": [],
-                "self_cosine_similarity": [],
-            },
+    num_features = feature_encoder_weights.shape[0]
+
+    # Create cartesian product of (i, j) layer pairs only
+    layer_pairs = [(i, j) for i in range(num_layers) for j in range(i + 1, num_layers)]
+
+    pbar = tqdm(layer_pairs, desc="Layer pairs", leave=True)
+    for i, j in pbar:
+        pbar.set_postfix({"i": i, "j": j})
+
+        # Initialize results storage for this layer pair
+        layer_results = {
+            "causality": [],
+            "causal_cosines": [],
+            "self_cosine_similarity": [],
+        }
+
+        # Use the batched function to compute all features for this layer pair efficiently
+        feature_results = compute_causal_attribution_strength_batched(
+            j=i,
+            k=j,
+            model=model,
+            dataset_or_batch=dataset,
+            feature_encoder_weights=feature_encoder_weights,
+            feature_encoder_bias=feature_encoder_bias,
+            feature_decoder_weights=feature_decoder_weights,
+            feature_indices=None,  # Compute all features
+            lambda_value=lambda_value,
+            exclude_first_k_tokens=exclude_first_k_tokens,
+            apply_to_all_tokens=apply_to_all_tokens,
         )
-        # If marginalize_across_sequences, iterate over batches with tqdm
-        if marginalize_across_sequences and isinstance(dataset, Dataset):
-            batch_pbar = tqdm(
-                range(0, len(dataset)),
-                desc=f"Batches for (i={i},j={j},f={idx})",
-                leave=False,
+
+        # Collect results
+        for idx in range(num_features):
+            layer_results["causality"].append(feature_results[idx]["causality"])
+            layer_results["causal_cosines"].append(
+                feature_results[idx]["causal_cosine"]
             )
-            batch_metrics = {
-                "causality": [],
-                "causal_cosines": [],
-                "self_cosine_similarity": [],
-            }
-            for batch_idx in batch_pbar:
-                batch = dataset[batch_idx : batch_idx + 1]
-                result = compute_causal_attribution_strength(
-                    j=i,
-                    k=j,
-                    model=model,
-                    dataset_or_batch=batch,
-                    feature_encoder_weights=feature_encoder_weights,
-                    feature_encoder_bias=feature_encoder_bias,
-                    feature_decoder_weights=feature_decoder_weights,
-                    lambda_value=lambda_value,
-                    feature_idx=idx,
-                    exclude_first_k_tokens=exclude_first_k_tokens,
-                    apply_to_all_tokens=apply_to_all_tokens,
-                )
-                dec_i = feature_decoder_weights[
-                    idx,
-                    i * hidden_size : (i + 1) * hidden_size,
-                ]
-                dec_j = feature_decoder_weights[
-                    idx,
-                    j * hidden_size : (j + 1) * hidden_size,
-                ]
-                self_cosine_sim = torch.nn.functional.cosine_similarity(
-                    dec_i.unsqueeze(0), dec_j.unsqueeze(0)
-                ).item()
-                batch_metrics["causality"].append(result.proportion_explained)
-                batch_metrics["causal_cosines"].append(result.causal_cosine)
-                batch_metrics["self_cosine_similarity"].append(
-                    torch.tensor(self_cosine_sim)
-                )
-            # Aggregate
-            for metric, values in batch_metrics.items():
-                if values:
-                    stacked_values = torch.tensor(values)
-                    layer_results[metric] = stacked_values.mean().item()
-                    layer_results[f"{metric}_std"] = stacked_values.std().item()
-                else:
-                    layer_results[metric] = np.nan
-                    layer_results[f"{metric}_std"] = np.nan
-        else:
-            result = compute_causal_attribution_strength(
-                j=i,
-                k=j,
-                model=model,
-                dataset_or_batch=dataset,
-                feature_encoder_weights=feature_encoder_weights,
-                feature_encoder_bias=feature_encoder_bias,
-                feature_decoder_weights=feature_decoder_weights,
-                lambda_value=lambda_value,
-                feature_idx=idx,
-                exclude_first_k_tokens=exclude_first_k_tokens,
-                apply_to_all_tokens=apply_to_all_tokens,
-            )
-            dec_i = feature_decoder_weights[
-                idx,
-                i * hidden_size : (i + 1) * hidden_size,
-            ]
-            dec_j = feature_decoder_weights[
-                idx,
-                j * hidden_size : (j + 1) * hidden_size,
-            ]
-            self_cosine_sim = torch.nn.functional.cosine_similarity(
-                dec_i.unsqueeze(0), dec_j.unsqueeze(0)
-            ).item()
-            layer_results["causality"].append(result.proportion_explained)
-            layer_results["causal_cosines"].append(result.causal_cosine)
             layer_results["self_cosine_similarity"].append(
-                torch.tensor(self_cosine_sim)
+                feature_results[idx]["self_cosine_similarity"]
             )
-            # Aggregate
-            for metric, values in layer_results.items():
-                if values:
-                    stacked_values = torch.tensor(values)
-                    layer_results[metric] = stacked_values.mean().item()
-                    layer_results[f"{metric}_std"] = stacked_values.std().item()
-                else:
-                    layer_results[metric] = np.nan
-                    layer_results[f"{metric}_std"] = np.nan
+
+        # Aggregate results for this layer pair
+        results[i][(i, j)] = {}
+        for metric, values in layer_results.items():
+            if values:
+                stacked_values = torch.tensor(values)
+                results[i][(i, j)][metric] = stacked_values.mean().item()
+                results[i][(i, j)][f"{metric}_std"] = stacked_values.std().item()
+            else:
+                results[i][(i, j)][metric] = np.nan
+                results[i][(i, j)][f"{metric}_std"] = np.nan
+
     return results
 
 
@@ -746,8 +795,8 @@ def _eval_feature_index(
             valid_causal_cosines = result.causal_cosine
             feature_causality = valid_causality
             feature_causal_cosines = valid_causal_cosines
-            layer_results["causality"].append(feature_causality)
-            layer_results["causal_cosines"].append(feature_causal_cosines)
+            layer_results["causality"].append(torch.tensor(feature_causality))
+            layer_results["causal_cosines"].append(torch.tensor(feature_causal_cosines))
             layer_results["self_cosine_similarity"].append(
                 torch.tensor(self_cosine_sim)
             )
@@ -821,8 +870,8 @@ def _eval_fixed_i(
             valid_causal_cosines = result.causal_cosine
             feature_causality = valid_causality
             feature_causal_cosines = valid_causal_cosines
-            layer_results["causality"].append(feature_causality)
-            layer_results["causal_cosines"].append(feature_causal_cosines)
+            layer_results["causality"].append(torch.tensor(feature_causality))
+            layer_results["causal_cosines"].append(torch.tensor(feature_causal_cosines))
             layer_results["self_cosine_similarity"].append(
                 torch.tensor(self_cosine_sim)
             )
@@ -857,63 +906,82 @@ def _eval_binned_features(
     """
     results = {layer: {} for layer in range(num_layers)}
     hidden_size = int(model.config.hidden_size)  # type: ignore
+
+    # Create list of all layer pairs to process
+    layer_pairs = []
     for i in range(num_layers):
         layer_features: torch.Tensor = binned_features[i]  # type: ignore
         if len(layer_features) == 0:
             continue
         for j in range(i + 1, num_layers):
-            layer_results = {
-                "causality": [],
-                "causal_cosines": [],
-                "self_cosine_similarity": [],
-            }
-            for feature_idx in layer_features:
-                idx = int(feature_idx)
-                result = compute_causal_attribution_strength(
-                    j=i,
-                    k=j,
-                    model=model,
-                    dataset_or_batch=dataset,
-                    feature_encoder_weights=feature_encoder_weights,
-                    feature_encoder_bias=feature_encoder_bias,
-                    feature_decoder_weights=feature_decoder_weights,
-                    lambda_value=lambda_value,
-                    feature_idx=idx,
-                    exclude_first_k_tokens=exclude_first_k_tokens,
-                    apply_to_all_tokens=apply_to_all_tokens,
-                )
-                dec_i = feature_decoder_weights[
-                    idx,
-                    i * hidden_size : (i + 1) * hidden_size,
-                ]
-                dec_j = feature_decoder_weights[
-                    idx,
-                    j * hidden_size : (j + 1) * hidden_size,
-                ]
-                self_cosine_sim = torch.nn.functional.cosine_similarity(
-                    dec_i.unsqueeze(0), dec_j.unsqueeze(0)
-                ).item()
-                valid_causality = result.proportion_explained
-                valid_causal_cosines = result.causal_cosine
-                feature_causality = valid_causality
-                feature_causal_cosines = valid_causal_cosines
-                layer_results["causality"].append(feature_causality)
-                layer_results["causal_cosines"].append(feature_causal_cosines)
-                layer_results["self_cosine_similarity"].append(
-                    torch.tensor(self_cosine_sim)
-                )
-            results[i][(i, j)] = {}
-            for metric, values in layer_results.items():
-                if values:
-                    stacked_values = torch.cat(values)
-                    if marginalize_across_sequences:
-                        results[i][(i, j)][metric] = stacked_values.mean().item()
-                        results[i][(i, j)][f"{metric}_std"] = (
-                            stacked_values.std().item()
-                        )
-                    else:
-                        results[i][(i, j)][metric] = np.nan
-                        results[i][(i, j)][f"{metric}_std"] = np.nan
+            layer_pairs.append((i, j, layer_features))
+
+    # Add progress bar for layer pairs
+    pbar = tqdm(layer_pairs, desc="Binned features layer pairs", leave=True)
+    for i, j, layer_features in pbar:
+        pbar.set_postfix({"i": i, "j": j, "n_features": len(layer_features)})
+
+        # Convert layer_features to list of integers for batched processing
+        feature_indices = [int(idx) for idx in layer_features]
+
+        # Use batched causal attribution for all features at once
+        batched_results = compute_causal_attribution_strength_batched(
+            j=i,
+            k=j,
+            model=model,
+            dataset_or_batch=dataset,
+            feature_encoder_weights=feature_encoder_weights,
+            feature_encoder_bias=feature_encoder_bias,
+            feature_decoder_weights=feature_decoder_weights,
+            feature_indices=feature_indices,
+            lambda_value=lambda_value,
+            exclude_first_k_tokens=exclude_first_k_tokens,
+            apply_to_all_tokens=apply_to_all_tokens,
+        )
+
+        # Extract results and compute self cosine similarities
+        layer_results = {
+            "causality": [],
+            "causal_cosines": [],
+            "self_cosine_similarity": [],
+        }
+
+        for idx in feature_indices:
+            feature_result = batched_results[idx]
+
+            # Compute self cosine similarity between decoder vectors
+            dec_i = feature_decoder_weights[
+                idx,
+                i * hidden_size : (i + 1) * hidden_size,
+            ]
+            dec_j = feature_decoder_weights[
+                idx,
+                j * hidden_size : (j + 1) * hidden_size,
+            ]
+            self_cosine_sim = torch.nn.functional.cosine_similarity(
+                dec_i.unsqueeze(0), dec_j.unsqueeze(0)
+            ).item()
+
+            # Store results
+            layer_results["causality"].append(torch.tensor(feature_result["causality"]))
+            layer_results["causal_cosines"].append(
+                torch.tensor(feature_result["causal_cosine"])
+            )
+            layer_results["self_cosine_similarity"].append(
+                torch.tensor(self_cosine_sim)
+            )
+
+        # Aggregate results
+        results[i][(i, j)] = {}
+        for metric, values in layer_results.items():
+            if values:
+                stacked_values = torch.stack(values)
+                if marginalize_across_sequences:
+                    results[i][(i, j)][metric] = stacked_values.mean().item()
+                    results[i][(i, j)][f"{metric}_std"] = stacked_values.std().item()
+                else:
+                    results[i][(i, j)][metric] = np.nan
+                    results[i][(i, j)][f"{metric}_std"] = np.nan
     return results
 
 

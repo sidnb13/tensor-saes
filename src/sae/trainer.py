@@ -59,6 +59,7 @@ class SaeTrainer:
         train_dataset: Dataset,
         test_dataset: Dataset,
         model: PreTrainedModel,
+        original_cfg,
         *args,
         **kwargs,
     ):
@@ -84,6 +85,7 @@ class SaeTrainer:
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
 
         self.cfg = cfg
+        self.original_cfg = original_cfg
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
         self.distribute_modules()
@@ -601,6 +603,16 @@ class SaeTrainer:
         # Return a list of results, one for each layer
         return {hook: buffer[:, i] for i, hook in enumerate(local_hooks)}
 
+    def save_training_config(self, checkpoint_dir: str):
+        """Save the full training configuration as config.yaml."""
+        config_path = os.path.join(checkpoint_dir, "config.yaml")
+        
+        # Use OmegaConf.save to save the original config
+        from omegaconf import OmegaConf
+        OmegaConf.save(self.original_cfg, config_path)
+        
+        logger.info(f"Saved training configuration to {config_path}")
+
     def save(self, step: int):
         """Save to disk."""
         if (
@@ -620,6 +632,9 @@ class SaeTrainer:
 
                 # Ensure the directory exists
                 os.makedirs(full_path, exist_ok=True)
+
+                # Save the full training configuration
+                self.save_training_config(full_path)
 
                 # Save the state dict instead of pickling the entire object
                 sae_state = {
@@ -647,6 +662,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
         model: PreTrainedModel,
         rank,
         world_size,
+        original_cfg,
     ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
@@ -686,6 +702,7 @@ class SaeLayerRangeTrainer(SaeTrainer):
             cfg.hookpoints = raw_hookpoints
 
         self.cfg = cfg
+        self.original_cfg = original_cfg
         self.dataset = dataset
         self.distribute_modules()
 
@@ -1192,6 +1209,8 @@ class SaeLayerRangeTrainer(SaeTrainer):
 
             if self.rank == 0:
                 sae.save_config(full_path)
+                # Save the full training configuration
+                self.save_training_config(full_path)
 
             if self.cfg.tp:
                 # Save the state dict instead of pickling the entire object
